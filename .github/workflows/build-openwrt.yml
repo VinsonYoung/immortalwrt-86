@@ -212,7 +212,7 @@ jobs:
         git -C openwrt/feeds/routing log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
         git -C openwrt/feeds/telephony log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
         git -C openwrt/feeds/helloworld log --pretty=format:"%s(#By %an)" --graph --since=8.hour | sed '/^$/d' >> release.txt || true
-        git -C openwrt/feeds/passwall log --pretty=format:"%s(#By %an)" --graph --since=8.hour | sed '/^$/d' >> release.txt || true
+        [ -d openwrt/feeds/passwall ] && git -C openwrt/feeds/passwall log --pretty=format:"%s(#By %an)" --graph --since=8.hour | sed '/^$/d' >> release.txt || true
         test  ! -s release.txt && echo -e "\n* The source code is not updated." >> release.txt
         sed -i '1i ## Firmware Update Log' release.txt
         [ "$UPLOAD_COWTRANSFER" == "true" ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
