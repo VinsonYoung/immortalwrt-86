@@ -264,7 +264,7 @@ if [ -s  "/tmp/cloud_ts_version" ]; then
 	DEV_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
 	DEV_UEFI_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
 	immortalwrt_sta=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta.md5
-	immortalwrt_sta_uefi=https://github.com/VinsonYoungimmortalwrt-86/releases/download/${new_version}/immortalwrt_sta_uefi.md5
+	immortalwrt_sta_uefi=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta_uefi.md5
 else
 	echo "请检测网络或重试！"
 	exit 1
