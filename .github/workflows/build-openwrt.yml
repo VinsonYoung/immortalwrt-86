@@ -222,8 +222,9 @@ jobs:
     - name: Upload firmware to release
       uses: softprops/action-gh-release@v3
       if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.op_update }}
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
@@ -238,7 +239,7 @@ jobs:
     - name: Remove old Releases
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.op_update }}
       run: |
         set -euo pipefail
         REPO="${{ github.repository }}"
