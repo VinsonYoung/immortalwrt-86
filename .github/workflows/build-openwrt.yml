@@ -94,7 +94,7 @@ jobs:
     - name: romupdate2
       run: |
         cd openwrt/package
-        git clone https://github.com/Blueplanet20120/romupdate2.git
+        git clone https://github.com/VinsonYoung/romupdate2.git
         
     - name: lenyu
       run: |
