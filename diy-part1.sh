@@ -17,6 +17,7 @@ sed -i "/helloworld/d" "feeds.conf.default"
 sed -i "/nikki/d" "feeds.conf.default"
 echo "src-git helloworld https://github.com/fw876/helloworld.git" >> "feeds.conf.default"
 echo "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main" >> "feeds.conf.default"
+echo "src-git openclash https://github.com/vernesong/OpenClash.git;dev" >> "feeds.conf.default"
 
 # Add a feed source
 
