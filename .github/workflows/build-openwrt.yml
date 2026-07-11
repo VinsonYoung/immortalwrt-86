@@ -26,7 +26,7 @@ on:
     
 env:
   REPO_URL: --single-branch --filter=blob:none https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: openwrt-24.10
+  REPO_BRANCH: openwrt-25.12
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .diffconfig
   DIY_P1_SH: diy-part1.sh
@@ -119,7 +119,8 @@ jobs:
 
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
-
+      
+               
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
