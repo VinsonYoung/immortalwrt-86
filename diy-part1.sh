@@ -16,6 +16,9 @@ sed -i "/helloworld/d" "feeds.conf.default"
 sed -i "/nikki/d" "feeds.conf.default"
 echo "src-git helloworld https://github.com/fw876/helloworld.git" >> "feeds.conf.default"
 echo "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main" >> "feeds.conf.default"
+# 强行将最新的 PassWall 专属 feed 注入到 feeds.conf.default 的最顶部
+sed -i '1i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
+sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
 
 # Add a feed source
 
@@ -30,7 +33,7 @@ touch files/usr/share/Lenyu-auto.sh
 touch files/usr/share/Lenyu-pw.sh
 
 # 修改为源码内部的相对路径，彻底解决 Permission denied 报错
-touch package/base-files/files/etc/sysupgrade.conf
+# touch package/base-files/files/etc/sysupgrade.conf
 
 # 修改为源码内部的相对路径
 cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
@@ -54,46 +57,47 @@ cat>rename.sh<<-'EOF'
 
 TARGET_DIR="bin/targets/x86/64"
 
-# 1. 兜底检查，确保在正确的上下文中执行
+# 1. 兜底检查，确保脚本在 openwrt 根目录下执行
 if [ ! -d "$TARGET_DIR" ]; then
-    echo "Error: 找不到 $TARGET_DIR，请确认脚本是否在 openwrt 根目录下执行。"
+    echo "Error: 找不到 $TARGET_DIR，请确认当前路径。"
     exit 1
 fi
 
 # 确保存放 version 记录的目录存在
 mkdir -p wget
 
-# 2. 批量清理冗余文件（使用通配符替代逐行硬编码，更简洁且容错率高）
+# 2. 批量清理冗余文件
 rm -f ${TARGET_DIR}/*.buildinfo
 rm -f ${TARGET_DIR}/*.manifest
 rm -f ${TARGET_DIR}/sha256sums
 rm -f ${TARGET_DIR}/profiles.json
 rm -f ${TARGET_DIR}/*-kernel.bin
 rm -f ${TARGET_DIR}/*-rootfs.*
-rm -f ${TARGET_DIR}/*-ext4-*.img.gz
-
-# 3. 读取前面 lenyu.sh 注入的自定义版本号
+rm -f ${TARGET_DIR}/*.vmdk
+rm -f ${TARGET_DIR}/*ext4-combined-efi.img.gz
+rm -f ${TARGET_DIR}/*ext4-combined.img.gz# 3. 读取前面 lenyu.sh 注入的自定义版本号
 if [ -f "files/etc/lenyu_version" ]; then
     rename_version=$(cat files/etc/lenyu_version)
 else
     rename_version="unknown"
-    echo "Warning: files/etc/lenyu_version 未找到，使用默认版本号 fallback。"
+    echo "Warning: files/etc/lenyu_version 未找到，使用 fallback 版本号。"
 fi
 
 # 4. 动态解析内核大版本与补丁号 (增强正则与去空格处理)
 kernel_patchver=$(grep "KERNEL_PATCHVER:=" target/linux/x86/Makefile | cut -d '=' -f2 | tr -d ' ')
-kernel_include_file="include/kernel-${kernel_patchver}"
+kernel_generic_file="target/linux/generic/kernel-${kernel_patchver}"
 
-if [ -f "$kernel_include_file" ]; then
-    # 提取类似 LINUX_VERSION-6.6 = .32 中的 32
-    kernel_subver=$(grep "^LINUX_VERSION-${kernel_patchver}" "$kernel_include_file" | awk -F'.' '{print $NF}' | tr -d ' ')
-    [ -n "$kernel_subver" ] && ver=".${kernel_subver}" || ver=""
+if [ -f "$kernel_generic_file" ]; then
+    # 精准抓取 LINUX_VERSION-6.12 = .94 行，提取出其中的后半部分（带点的 .94）
+    ver=$(grep "LINUX_VERSION-${kernel_patchver}" "$kernel_generic_file" | cut -d '=' -f2 | tr -d ' ')
 else
     ver=""
 fi
 
-# 5. 组合最终的文件名 Base
-base_name="immortalwrt_x86-64-${rename_version}_${kernel_patchver}${ver}"
+# 5. 组合【纯净版号】与【文件名 Base】
+# 组合出来的 pure_version 格式形如：2607100810_sta_Len_yu_6.12.94
+pure_version="${rename_version}_${kernel_patchver}${ver}"
+base_name="immortalwrt_x86-64-${pure_version}"
 
 dest_img_name="${base_name}_sta_Lenyu.img.gz"
 dest_efi_name="${base_name}_uefi-gpt_sta_Lenyu.img.gz"
@@ -119,7 +123,10 @@ fi
 
 # 7. 回到根目录，生成供 GitHub Actions Release 提取的标签与文件清单
 cd - >/dev/null
-echo "${base_name}_sta_Lenyu" > wget/op_version1
+
+# 【核心修改点】：这里只输出纯净的版本号给 GitHub，剥离多余的前后缀
+echo "$pure_version" > wget/op_version1
+
 ls -1 ${TARGET_DIR} > wget/open_sta_md5
 
 exit 0
@@ -136,6 +143,9 @@ lenyu_version="$(date '+%y%m%d%H%M')_sta_Len_yu"
 echo "$lenyu_version" > wget/DISTRIB_REVISION1 
 echo "$lenyu_version" | cut -d _ -f 1 > files/etc/lenyu_version  
 new_DISTRIB_REVISION=$(cat wget/DISTRIB_REVISION1)
+# 3.替换 os-release 模板（适配ImmortalWrt 25.12 去除末尾的 %C 以移除 Git commit 号）
+os_release_template="package/base-files/files/usr/lib/os-release"
+[ -f "$os_release_template" ] && sed -i "s|OPENWRT_RELEASE=\"%D %V %C\"|OPENWRT_RELEASE=\"ImmortalWrt 25.12-${new_DISTRIB_REVISION}\"|g" "$os_release_template"
 
 # 定义需要修改的默认设置文件路径
 TARGET_FILE="package/emortal/default-settings/files/99-default-settings"
@@ -148,7 +158,7 @@ fi
 
 # 3. 注入 Check_Update.sh 别名和系统版本描述
 if ! grep -q "Check_Update.sh" "$TARGET_FILE"; then
-    # 彻底清除文件末尾的 exit 0，防止 logic 中断
+    # 彻底清除文件末尾的 exit 0，防止逻辑中断
     sed -i 's/exit 0//g' "$TARGET_FILE"
     # 注意：此处 EOF 前不要加斜杠，以允许 $new_DISTRIB_REVISION 变量展开；
     # 内部包含 $ 的普通命令则使用 \$ 转义。
@@ -237,7 +247,6 @@ if ! grep -q "custom-backup.tar.gz" "$TARGET_FILE"; then
 	exit 0
 	EOF
 fi
-
 EOOF
 
 cat>files/usr/share/Check_Update.sh<<-'EOF'
