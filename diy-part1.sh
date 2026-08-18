@@ -43,7 +43,7 @@ cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
 /etc/config/passwall_show
 /etc/config/passwall_server
 /etc/config/passwall
-/etc/openclash/core/ #dev
+/etc/openclash/core/clash_meta
 /usr/share/passwall/rules/
 /usr/share/singbox/
 /usr/bin/chinadns-ng
