@@ -1,1 +1,268 @@
+#
+# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+# Description: Build OpenWrt using GitHub Actions
+#
 
+name: Build OpenWrt
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
+#   watch:
+#     types: started
+    
+  #schedule:
+     #- cron: 00 22 * * *
+    
+env:
+  REPO_URL: --single-branch --filter=blob:none https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-25.12
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .diffconfig
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_COWTRANSFER: false
+  UPLOAD_WETRANSFER: false
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: false  # 强制保留交换空间，防止多线程编译时内存(OOM)溢出
+
+    - name: Check free space
+      run: |
+        echo "Free space after cleanup:"
+        df -hT
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: Clone source code
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+   
+    - name: Cache
+      uses: klever1988/cachewrtbuild@main
+      with:
+        ccache: 'true'
+        clean: 'false'
+        prefix: ${{ github.workspace }}/openwrt
+
+    - name: Install custom packages
+      working-directory: openwrt
+      run: |
+        mkdir package/luci-app-openclash
+        pushd package/luci-app-openclash
+        git init
+        git remote add -f origin https://github.com/vernesong/OpenClash.git
+        git config core.sparsecheckout true
+        echo "luci-app-openclash" >> .git/info/sparse-checkout
+        git pull --depth 1 origin dev
+        git branch --set-upstream-to=origin/dev
+        popd        
+    
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+    
+    - name: romupdate2
+      run: |
+        cd openwrt/package
+        git clone https://github.com/VinsonYoung/romupdate2.git
+        
+    - name: lenyu
+      run: |
+        cd openwrt
+        bash $GITHUB_WORKSPACE/lenyu.sh
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+      
+               
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: SSH connection to Actions
+      uses: P3TERX/ssh2actions@v1.0.0
+      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      env:
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
+        
+        # ☢️ 终极必杀技：专门对付 Host 架构的硬编码流氓判定
+        # 锁定带有 download-ci-llvm 的行，把里面的 true 全部干掉换成 false！
+        # 无论源码怎么变，它的判定逻辑最终都会变成 (...,false,false)，彻底断绝下载行为。
+        if [ -f feeds/packages/lang/rust/Makefile ]; then
+          sed -i '/download-ci-llvm/ s/true/false/g' feeds/packages/lang/rust/Makefile
+        fi
+        
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@v6
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
+   
+    - name: delete files
+      run: |
+        cd openwrt
+        bash $GITHUB_WORKSPACE/rename.sh
+    
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@v6
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Upload firmware to cowtransfer
+      id: cowtransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
+      run: |
+        curl -fsSL git.io/file-transfer | sh
+        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
+        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
+        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to WeTransfer
+      id: wetransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
+      run: |
+        curl -fsSL git.io/file-transfer | sh
+        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
+        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
+        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        [ -f openwrt/wget/op_version1 ] && echo "release_tag=$(cat openwrt/wget/op_version1)" >> $GITHUB_OUTPUT || echo "release_tag=ImmortalWrt_${{ env.FILE_DATE }}" >> $GITHUB_OUTPUT
+        git -C openwrt log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt
+        git -C openwrt/feeds/packages log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
+        git -C openwrt/feeds/luci log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
+        git -C openwrt/feeds/routing log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
+        git -C openwrt/feeds/telephony log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
+        git -C openwrt/feeds/helloworld log --pretty=format:"%s(#By %an)" --graph --since=8.hour | sed '/^$/d' >> release.txt || true
+        [ -d openwrt/feeds/passwall ] && git -C openwrt/feeds/passwall log --pretty=format:"%s(#By %an)" --graph --since=8.hour | sed '/^$/d' >> release.txt || true
+        test  ! -s release.txt && echo -e "\n* The source code is not updated." >> release.txt
+        sed -i '1i ## Firmware Update Log' release.txt
+        [ "$UPLOAD_COWTRANSFER" == "true" ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
+        [ "$UPLOAD_WETRANSFER" == "true" ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v3
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.op_update }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+        # prerelease: true
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        retain_days: 2
+        keep_minimum_runs: 10
+
+    - name: Remove old Releases
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      env:
+        GH_TOKEN: ${{ secrets.op_update }}
+      run: |
+        set -euo pipefail
+        REPO="${{ github.repository }}"
+        KEEP=10
+        i=0
+        while IFS= read -r tag; do
+          if [ "$i" -ge "$KEEP" ]; then
+            echo "Deleting release (and tag): $tag"
+            gh release delete "$tag" --yes --cleanup-tag -R "$REPO" || true
+          fi
+          i=$((i + 1))
+        done < <(gh api "repos/${REPO}/releases" --paginate --jq '.[] | .tag_name')
