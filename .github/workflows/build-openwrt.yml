@@ -87,7 +87,9 @@ jobs:
     - name: Install custom packages
       working-directory: openwrt
       run: |
-        mkdir package/luci-app-openclash
+        set -e
+
+        mkdir -p package/luci-app-openclash
         pushd package/luci-app-openclash
         git init
         git remote add -f origin https://github.com/vernesong/OpenClash.git
@@ -95,101 +97,71 @@ jobs:
         echo "luci-app-openclash" >> .git/info/sparse-checkout
         git pull --depth 1 origin dev
         git branch --set-upstream-to=origin/dev
-        popd        
-    
-    - name: Setup Go 1.26 for Smart Mihomo
-      uses: actions/setup-go@v6
-      with:
-        go-version: '1.26'
-        check-latest: true
-        cache: false
+        popd
 
-    - name: Build and Embed Smart Mihomo Core
+    - name: Download and Embed Smart Mihomo Core
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+
+        # ImmortalWrt 25.12.x x86-64
+        # 使用 vernesong/mihomo 的 Prerelease-Alpha，选择 amd64-compatible。
+        # Release 中的 Core 是 gzip 压缩文件，必须先解压，再改名为 clash_meta。
+        CORE_DIR="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core"
+        mkdir -p "$CORE_DIR"
+
+        API_URL="https://api.github.com/repos/vernesong/mihomo/releases?per_page=20"
+
+        echo "===== Find latest Smart Core amd64-compatible release asset ====="
+
+        ASSET_URL=$(curl -fsSL \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "$API_URL" \
+          | jq -r '
+              .[]
+              | select(.tag_name == "Prerelease-Alpha")
+              | .assets[]
+              | select(.name | test("^mihomo-linux-amd64-compatible.*\\.gz$"))
+              | .browser_download_url
+            ' \
+          | head -n1)
+
+        if [ -z "$ASSET_URL" ]; then
+          echo "ERROR: Could not find mihomo-linux-amd64-compatible *.gz in vernesong/mihomo Prerelease-Alpha."
+          exit 1
+        fi
+
+        echo "Download: $ASSET_URL"
+
+        curl -fL --retry 3 --retry-delay 2 \
+          "$ASSET_URL" \
+          -o /tmp/mihomo.gz
+
+        echo "===== Decompress Mihomo Core ====="
+        gzip -d -f /tmp/mihomo.gz
+
+        # gzip 解压后得到原始 ELF 二进制，按 OpenClash 要求命名为 clash_meta。
+        mv /tmp/mihomo "$CORE_DIR/clash_meta"
+        chmod 755 "$CORE_DIR/clash_meta"
+
+        echo "===== Verify embedded Core ====="
+        ls -lh "$CORE_DIR/clash_meta"
+        file "$CORE_DIR/clash_meta"
+        "$CORE_DIR/clash_meta" -v
+
+        test -x "$CORE_DIR/clash_meta"
+
+    - name: Verify OpenClash Smart Core Package File
       working-directory: openwrt
       run: |
         set -e
-
-        echo "===== Setup Go 1.26 ====="
-        echo "Go will be installed by actions/setup-go"
-
-        # OpenClash 官方 Smart Core 构建方式：
-        # vernesong/mihomo Alpha + linux/amd64 + GOAMD64=v1
-        # 即 amd64-compatible，兼容性优先。
-        #
-        # 官方 CI 同时使用 Go 1.26、with_gvisor、UPX 压缩及版本/构建时间 ldflags。
-
-        sudo apt-get update
-        sudo apt-get -y install ca-certificates wget tar
-        sudo update-ca-certificates
-
-        echo "===== Setup UPX 3.95 ====="
-        wget -q \
-          https://github.com/upx/upx/releases/download/v3.95/upx-3.95-amd64_linux.tar.xz \
-          -O /tmp/upx.tar.xz
-        tar -xf /tmp/upx.tar.xz -C /tmp
-        UPX=/tmp/upx-3.95-amd64_linux/upx
-        test -x "$UPX"
-
-        echo "===== Clone vernesong/mihomo Alpha ====="
-        rm -rf /tmp/vernesong_mihomo
-        git clone --depth=1 --branch=Alpha \
-          https://github.com/vernesong/mihomo.git \
-          /tmp/vernesong_mihomo
-
-        cd /tmp/vernesong_mihomo
-
-        SMART_ID="alpha-smart-g$(git rev-parse --short HEAD)"
-        BUILDTIME="$(date -u)"
-
-        echo "Smart Core: $SMART_ID"
-        echo "Build time: $BUILDTIME"
-
-        # 与 OpenClash 官方 compile_meta_core.yml 保持一致。
-        # x86-64 amd64-compatible = GOAMD64=v1
-        export GOOS=linux
-        export GOARCH=amd64
-        export GOAMD64=v1
-        export CGO_ENABLED=0
-
-        # 使用 Actions 官方 Go 1.26。
-        echo "===== Build Smart Core ====="
-        go version
-
-        # 更新 CA 证书到 Smart Core 使用的证书文件。
-        cp -f /etc/ssl/certs/ca-certificates.crt \
-          ./component/ca/ca-certificates.crt
-
-        mkdir -p ./bin
-
-        go build -tags with_gvisor -trimpath \
-          -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=${SMART_ID}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' -w -s -buildid=" \
-          -o ./bin/clash
-
-        chmod 755 ./bin/clash
-
-        echo "===== Compress Core with UPX ====="
-        "$UPX" --lzma --best ./bin/clash || true
-
-        echo "===== Verify Core ====="
-        file ./bin/clash
-        ./bin/clash -v
-        ls -lh ./bin/clash
-
-        echo "===== Embed clash_meta into OpenClash ====="
-        CORE_DIR="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core"
-
-        mkdir -p "$CORE_DIR"
-        cp ./bin/clash "$CORE_DIR/clash_meta"
-        chmod 755 "$CORE_DIR/clash_meta"
-
-        echo "===== Embedded Core ====="
-        ls -lh "$CORE_DIR/clash_meta"
-        file "$CORE_DIR/clash_meta"
-
-        echo "===== Verify OpenClash package tree ====="
-        test -x "$CORE_DIR/clash_meta"
-        test -f "$CORE_DIR/clash_meta"
-
+        CORE="package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core/clash_meta"
+        test -f "$CORE"
+        test -x "$CORE"
+        echo "OpenClash Smart Core is ready: $CORE"
+        ls -lh "$CORE"
+    
     - name: Load custom feeds
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
