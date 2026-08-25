@@ -162,6 +162,48 @@ jobs:
         echo "OpenClash Smart Core is ready: $CORE"
         ls -lh "$CORE"
     
+    - name: Download and Embed Latest Zashboard
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+
+        # 将 Zashboard 最新 Release 的 dist.zip 直接编译进 OpenClash。
+        # 目标目录：/usr/share/openclash/ui/zashboard/
+        ZASHBOARD_PATH="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/usr/share/openclash/ui/zashboard"
+        ZASHBOARD_ZIP="/tmp/zashboard-dist.zip"
+        ZASHBOARD_TMP="/tmp/zashboard-extract"
+
+        echo "===== Download latest Zashboard dist.zip ====="
+
+        rm -rf "$ZASHBOARD_TMP" "$ZASHBOARD_ZIP" "$ZASHBOARD_PATH"
+        mkdir -p "$ZASHBOARD_TMP" "$ZASHBOARD_PATH"
+
+        if ! command -v unzip >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y unzip
+        fi
+
+        curl -fL --retry 3 --retry-delay 2 \
+          "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip" \
+          -o "$ZASHBOARD_ZIP"
+
+        echo "===== Verify Zashboard ZIP ====="
+        unzip -tq "$ZASHBOARD_ZIP"
+
+        echo "===== Extract Zashboard ====="
+        unzip -q -o "$ZASHBOARD_ZIP" -d "$ZASHBOARD_TMP"
+
+        # 官方 dist.zip 的内容位于 dist/ 目录。
+        test -f "$ZASHBOARD_TMP/dist/index.html"
+
+        cp -a "$ZASHBOARD_TMP/dist/." "$ZASHBOARD_PATH/"
+
+        echo "===== Verify embedded Zashboard ====="
+        test -f "$ZASHBOARD_PATH/index.html"
+        echo "Zashboard embedded at: $ZASHBOARD_PATH"
+        du -sh "$ZASHBOARD_PATH"
+        find "$ZASHBOARD_PATH" -maxdepth 2 -type f | head -20
+
     - name: Load custom feeds
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
