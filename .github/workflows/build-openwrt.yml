@@ -202,7 +202,7 @@ jobs:
         test -f "$ZASHBOARD_PATH/index.html"
         echo "Zashboard embedded at: $ZASHBOARD_PATH"
         du -sh "$ZASHBOARD_PATH"
-        find "$ZASHBOARD_PATH" -maxdepth 2 -type f | head -20
+        find "$ZASHBOARD_PATH" -maxdepth 2 -type f 2>/dev/null | head -20 || true
 
     - name: Load custom feeds
       run: |
