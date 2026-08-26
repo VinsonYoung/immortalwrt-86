@@ -43,6 +43,7 @@ cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
 /etc/config/passwall_show
 /etc/config/passwall_server
 /etc/config/passwall
+/etc/openclash/config/
 /etc/openclash/core/
 /usr/share/openclash/ui/zashboard/
 /usr/share/passwall/rules/
