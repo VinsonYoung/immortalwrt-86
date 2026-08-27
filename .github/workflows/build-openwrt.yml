@@ -99,51 +99,44 @@ jobs:
         git branch --set-upstream-to=origin/dev
         popd
 
-    - name: Download and Embed Smart Mihomo Core
+    - name: Download and Embed OpenClash Official Smart Core
       working-directory: openwrt
       run: |
         set -euo pipefail
 
         # ImmortalWrt 25.12.x x86-64
-        # 使用 vernesong/mihomo 的 Prerelease-Alpha，选择 amd64-compatible。
-        # Release 中的 Core 是 gzip 压缩文件，必须先解压，再改名为 clash_meta。
+        # 直接使用 OpenClash 官方 core 分支中的 Smart Core。
+        # OpenClash 自己的 core 更新脚本也是从同一来源获取该文件。
+        # linux-amd64-v1 = x86-64 / GOAMD64=v1（兼容性优先）
         CORE_DIR="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core"
+        CORE_TARBALL="/tmp/clash-linux-amd64-v1.tar.gz"
+        CORE_TMP="/tmp/openclash-smart-core"
+        CORE_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/dev/smart/clash-linux-amd64-v1.tar.gz"
+
         mkdir -p "$CORE_DIR"
+        rm -rf "$CORE_TMP" "$CORE_TARBALL"
+        mkdir -p "$CORE_TMP"
 
-        API_URL="https://api.github.com/repos/vernesong/mihomo/releases?per_page=20"
-
-        echo "===== Find latest Smart Core amd64-compatible release asset ====="
-
-        ASSET_URL=$(curl -fsSL \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "$API_URL" \
-          | jq -r '
-              .[]
-              | select(.tag_name == "Prerelease-Alpha")
-              | .assets[]
-              | select(.name | test("^mihomo-linux-amd64-compatible.*\\.gz$"))
-              | .browser_download_url
-            ' \
-          | head -n1)
-
-        if [ -z "$ASSET_URL" ]; then
-          echo "ERROR: Could not find mihomo-linux-amd64-compatible *.gz in vernesong/mihomo Prerelease-Alpha."
-          exit 1
-        fi
-
-        echo "Download: $ASSET_URL"
+        echo "===== Download OpenClash official Smart Core ====="
+        echo "URL: $CORE_URL"
 
         curl -fL --retry 3 --retry-delay 2 \
-          "$ASSET_URL" \
-          -o /tmp/mihomo.gz
+          "$CORE_URL" \
+          -o "$CORE_TARBALL"
 
-        echo "===== Decompress Mihomo Core ====="
-        gzip -d -f /tmp/mihomo.gz
+        echo "===== Verify Core archive ====="
+        tar -tzf "$CORE_TARBALL"
 
-        # gzip 解压后得到原始 ELF 二进制，按 OpenClash 要求命名为 clash_meta。
-        mv /tmp/mihomo "$CORE_DIR/clash_meta"
-        chmod 755 "$CORE_DIR/clash_meta"
+        echo "===== Extract Core ====="
+        tar -xzf "$CORE_TARBALL" -C "$CORE_TMP"
+
+        test -f "$CORE_TMP/clash"
+
+        # OpenClash 使用 /etc/openclash/core/clash_meta 作为 Smart Core。
+        cp -f "$CORE_TMP/clash" "$CORE_DIR/clash_meta"
+
+        # 与 OpenClash 自己的 Core 更新流程保持一致。
+        chmod 4755 "$CORE_DIR/clash_meta"
 
         echo "===== Verify embedded Core ====="
         ls -lh "$CORE_DIR/clash_meta"
@@ -151,6 +144,25 @@ jobs:
         "$CORE_DIR/clash_meta" -v
 
         test -x "$CORE_DIR/clash_meta"
+
+    - name: Record Embedded Smart Core Version
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+
+        CORE_VERSION_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/dev/core_version"
+        CORE_VERSION_FILE="/tmp/openclash-core_version"
+
+        curl -fL --retry 3 --retry-delay 2 \
+          "$CORE_VERSION_URL" \
+          -o "$CORE_VERSION_FILE"
+
+        echo "===== OpenClash core/dev/core_version ====="
+        cat "$CORE_VERSION_FILE"
+
+        echo "===== Embedded Smart Core ====="
+        CORE="package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core/clash_meta"
+        "$CORE" -v
 
     - name: Verify OpenClash Smart Core Package File
       working-directory: openwrt
