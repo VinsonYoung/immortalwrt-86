@@ -99,51 +99,112 @@ jobs:
         git branch --set-upstream-to=origin/dev
         popd
 
-    - name: Download and Embed OpenClash Official Smart Core
+    - name: Download and Embed Smart Mihomo Core from vernesong/mihomo Releases
       working-directory: openwrt
       run: |
         set -euo pipefail
-
-        # ImmortalWrt 25.12.x x86-64
-        # 直接使用 OpenClash 官方 core 分支中的 Smart Core。
-        # OpenClash 自己的 core 更新脚本也是从同一来源获取该文件。
-        # linux-amd64-v1 = x86-64 / GOAMD64=v1（兼容性优先）
+        
+        # ImmortalWrt 25.12.x x86-64 / OpenClash Smart Core.
+        # Source: https://github.com/vernesong/mihomo/releases
+        # Download the Prerelease-Alpha amd64-compatible binary, then decompress it
+        # and rename it to clash_meta for OpenClash.
         CORE_DIR="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core"
-        CORE_TARBALL="/tmp/clash-linux-amd64-v1.tar.gz"
-        CORE_TMP="/tmp/openclash-smart-core"
-        CORE_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/dev/smart/clash-linux-amd64-v1.tar.gz"
-
+        CORE_GZ="/tmp/mihomo-smart-amd64-compatible.gz"
+        CORE_BIN="/tmp/mihomo-smart-amd64-compatible"
+        RELEASE_TAG="Prerelease-Alpha"
+        RELEASE_API="https://api.github.com/repos/vernesong/mihomo/releases/tags/${RELEASE_TAG}"
+        
         mkdir -p "$CORE_DIR"
-        rm -rf "$CORE_TMP" "$CORE_TARBALL"
-        mkdir -p "$CORE_TMP"
-
-        echo "===== Download OpenClash official Smart Core ====="
-        echo "URL: $CORE_URL"
-
+        rm -f "$CORE_GZ" "$CORE_BIN"
+        
+        echo "===== Query vernesong/mihomo Release ====="
+        RELEASE_JSON="$(curl -fsSL --retry 3 --retry-delay 2 "$RELEASE_API")"
+        RELEASE_NAME="$(printf '%s' "$RELEASE_JSON" | jq -r '.name')"
+        echo "Release: $RELEASE_NAME"
+        
+        DOWNLOAD_URL="$(printf '%s' "$RELEASE_JSON" \
+          | jq -r '.assets[] | select(.name | test("^mihomo-linux-amd64-compatible-.*\\.gz$")) | .browser_download_url' \
+          | head -n 1)"
+        
+        test -n "$DOWNLOAD_URL"
+        echo "Download URL: $DOWNLOAD_URL"
+        
+        echo "===== Download Smart Core ====="
         curl -fL --retry 3 --retry-delay 2 \
-          "$CORE_URL" \
-          -o "$CORE_TARBALL"
-
-        echo "===== Verify Core archive ====="
-        tar -tzf "$CORE_TARBALL"
-
-        echo "===== Extract Core ====="
-        tar -xzf "$CORE_TARBALL" -C "$CORE_TMP"
-
-        test -f "$CORE_TMP/clash"
-
-        # OpenClash 使用 /etc/openclash/core/clash_meta 作为 Smart Core。
-        cp -f "$CORE_TMP/clash" "$CORE_DIR/clash_meta"
-
-        # 与 OpenClash 自己的 Core 更新流程保持一致。
+          "$DOWNLOAD_URL" \
+          -o "$CORE_GZ"
+        
+        echo "===== Verify gzip archive ====="
+        gzip -t "$CORE_GZ"
+        
+        echo "===== Extract Smart Core ====="
+        gzip -dc "$CORE_GZ" > "$CORE_BIN"
+        
+        test -f "$CORE_BIN"
+        test -s "$CORE_BIN"
+        
+        # OpenClash expects the executable at /etc/openclash/core/clash_meta.
+        cp -f "$CORE_BIN" "$CORE_DIR/clash_meta"
         chmod 4755 "$CORE_DIR/clash_meta"
-
-        echo "===== Verify embedded Core ====="
+        
+        echo "===== Verify embedded Smart Core ====="
         ls -lh "$CORE_DIR/clash_meta"
         file "$CORE_DIR/clash_meta"
         "$CORE_DIR/clash_meta" -v
-
         test -x "$CORE_DIR/clash_meta"
+
+    - name: Add OpenClash Core sysupgrade protection
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+        
+        INIT_DIR="package/luci-app-openclash/luci-app-openclash/root/etc/uci-defaults"
+        INIT_SCRIPT="$INIT_DIR/99-openclash-core-sysupgrade"
+        mkdir -p "$INIT_DIR"
+        
+        cat > "$INIT_SCRIPT" <<'EOF_SCRIPT'
+        #!/bin/sh
+        # Preserve OpenClash configuration across sysupgrade, but never preserve
+        # /etc/openclash/core/. The new firmware contains the desired Smart Core.
+        
+        # First upgrade after installing this custom build:
+        # sysupgrade may restore the old Core into OverlayFS upper. Remove ONLY the
+        # upper-layer copy; do not rm the merged /etc/openclash/core/clash_meta path,
+        # because that could create a whiteout and hide the Core embedded in /rom.
+        UPPER_CORE="/overlay/upper/etc/openclash/core/clash_meta"
+        if [ -f "$UPPER_CORE" ] || [ -L "$UPPER_CORE" ]; then
+            rm -f "$UPPER_CORE"
+        fi
+        
+        mkdir -p /lib/upgrade/keep.d
+        
+        # Keep OpenClash user data/configuration, but exclude the core directory.
+        cat > /lib/upgrade/keep.d/luci-app-openclash <<'EOF_KEEP'
+        /etc/openclash/config/
+        /etc/openclash/proxy_provider/
+        /etc/openclash/rule_provider/
+        /etc/openclash/history/
+        /etc/openclash/custom/
+        /etc/openclash/game_rules/
+        /etc/openclash/overwrite/
+        /etc/openclash/cache.db
+        /etc/openclash/*.yaml
+        /etc/openclash/*.yml
+        /etc/openclash/*.json
+        /etc/openclash/*.list
+        /etc/openclash/*.ipset
+        /etc/openclash/*.dat
+        /etc/openclash/*.mmdb
+        /etc/openclash/*.bin
+        EOF_KEEP
+        
+        exit 0
+        EOF_SCRIPT
+        
+        chmod 755 "$INIT_SCRIPT"
+        
+        echo "===== Verify OpenClash Core sysupgrade protection ====="
+        sed -n '1,120p' "$INIT_SCRIPT"
 
     - name: Record Embedded Smart Core Version
       working-directory: openwrt
