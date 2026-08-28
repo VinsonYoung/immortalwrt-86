@@ -45,7 +45,7 @@ cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
 /etc/config/passwall
 # /etc/openclash/config/
 # /etc/openclash/core/
-/usr/share/openclash/ui/zashboard/
+# /usr/share/openclash/ui/zashboard/
 /usr/share/passwall/rules/
 /usr/share/singbox/
 /usr/bin/chinadns-ng
