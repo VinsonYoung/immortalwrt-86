@@ -446,3 +446,4 @@ jobs:
           fi
           i=$((i + 1))
         done < <(gh api "repos/${REPO}/releases" --paginate --jq '.[] | .tag_name')
+        
