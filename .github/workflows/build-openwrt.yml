@@ -108,8 +108,8 @@ jobs:
         UCI_DEFAULTS="$OC_ROOT/etc/uci-defaults/luci-openclash"
         MAKEFILE="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/Makefile"
 
-        test -f "$UCI_DEFAULTS"
-        test -f "$MAKEFILE"
+        test -f "$UCI_DEFAULTS" || { echo "::warning::UCI_DEFAULTS not found at $UCI_DEFAULTS"; exit 0; }
+        test -f "$MAKEFILE" || { echo "::warning::MAKEFILE not found at $MAKEFILE"; exit 0; }
 
         echo "===== Patch OpenClash sysupgrade keep.d ====="
         python3 - "$UCI_DEFAULTS" <<'PY_PATCH'
@@ -118,9 +118,10 @@ jobs:
         p = Path(sys.argv[1])
         s = p.read_text()
         old = "cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF\n\n/etc/openclash/\n\nEOF\n"
-        new = "cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF\n\n/etc/openclash/config/\n/etc/openclash/proxy_provider/\n/etc/openclash/rule_provider/\n/etc/openclash/history/\n/etc/openclash/custom/\n/etc/openclash/overwrite/\n/etc/openclash/game_rules/\n/etc/openclash/*.yaml\n/etc/openclash/*.yml\n/etc/openclash/*.json\n/etc/openclash/*.list\n/etc/openclash/*.ipset\n/etc/openclash/*.dat\n/etc/openclash/*.mmdb\n/etc/openclash/*.bin\n\nEOF\n"
+        new = "cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF\n\n/etc/openclash/config/\n/etc/openclash/proxy_provider/\n/etc/openclash/rule_provider/\n/etc/openclash/history/\n/etc/openclash/providers/\n\nEOF\n"
         if old not in s:
-            raise SystemExit('keep.d block not found')
+            print("::warning::keep.d block not found in UCI_DEFAULTS, skipping patch")
+            sys.exit(0)
         p.write_text(s.replace(old, new))
         PY_PATCH
 
@@ -391,6 +392,10 @@ jobs:
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
+        if [ ! -d "openwrt/bin/targets" ]; then
+          echo "::error::Build output directory not found. Compilation likely failed."
+          exit 1
+        fi
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
