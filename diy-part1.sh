@@ -37,20 +37,43 @@ touch files/usr/share/Lenyu-pw.sh
 
 # 修改为源码内部的相对路径
 cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
+# ===== 网络与系统配置保留 =====
 /etc/config/dhcp
 /etc/config/sing-box
 /etc/config/romupdate
 /etc/config/passwall_show
 /etc/config/passwall_server
 /etc/config/passwall
-# /etc/openclash/config/
-# /etc/openclash/core/
-# /usr/share/openclash/ui/zashboard/
+
+# ===== OpenClash 配置保留（仅保留配置文件，不保留内核） =====
+# 注意：/etc/openclash/core/ 和 /usr/share/openclash/ui/ 不保留
+# 这样升级时会使用新编译固件里的内核文件，避免版本不一致
+/etc/config/openclash
+
+# ===== Passwall 规则保留 =====
 /usr/share/passwall/rules/
 /usr/share/singbox/
+
+# ===== 二进制工具保留 =====
 /usr/bin/chinadns-ng
 /usr/bin/sing-box
 /usr/bin/hysteria
+
+# ===== 系统认证与密码保留（防止升级后密码被重置） =====
+/etc/shadow
+/etc/shadow-
+/etc/passwd
+/etc/group
+/etc/gshadow
+/etc/sudoers
+/etc/sudoers.d/
+
+# ===== SSH 密钥保留 =====
+/etc/ssh/
+/root/.ssh/
+
+# ===== root 用户定时任务保留 =====
+/etc/crontabs/root
 EOF
 
 
@@ -260,7 +283,7 @@ cat>files/usr/share/Check_Update.sh<<-'EOF'
 #检测准备
 if [ ! -f  "/etc/lenyu_version" ]; then
 	echo
-	echo -e "\033[31m 该脚本在非Lenyu固件上运行，为避免不必要的麻烦，准备退出… \033[0m"
+	echo -e "\033[31m 该脚本在非Lenyu固件上运行，为避免不必要的麻烦���准备退出… \033[0m"
 	echo
 	exit 0
 fi
@@ -360,7 +383,7 @@ case $num1 in
 	  echo
     echo -e "\033[31m err：只能选择Y/N\033[0m"
 	  echo
-    read -n 1 -p  "请回车继续…"
+     read -n 1 -p  "请回车继续…"
 	  echo
 	  open_up
 esac
@@ -411,7 +434,7 @@ rm -f /tmp/cloud_version
 
 # 获取固件云端版本号、内核版本号信息
 current_version=`cat /etc/lenyu_version`
-# wget -qO- -T2 "https://api.github.com/repos/VinsonYoung/immortalwrt-86/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g;s/v//g'  > /tmp/cloud_ts_version
+# wget -qO- -T2 "https://api.github.com/repos/VinsonYoung/immortalwrt-86/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g;s/v//g'  > /tmp/clou[...]
 # 因immortalwrt不支持上述格式.
 curl -s https://api.github.com/repos/VinsonYoung/immortalwrt-86/releases/latest | grep 'tag_name' | cut -d\" -f4 > /tmp/cloud_ts_version
 sleep 3
@@ -621,7 +644,7 @@ fi
 ########################################
 # 6. 备份自定义规则
 ########################################
-echo_blue "备份自定义规则..."
+echo_blue "备份��定义规则..."
 mkdir -p "$RULE_BACKUP"
 for f in direct_host direct_ip proxy_host; do
   [ -f "$RULE_DIR/$f" ] && cp "$RULE_DIR/$f" "$RULE_BACKUP/$f"
