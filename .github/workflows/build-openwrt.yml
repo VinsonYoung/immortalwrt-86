@@ -197,6 +197,18 @@ jobs:
         "$CORE_DIR/clash_meta" -v
         test -x "$CORE_DIR/clash_meta"
 
+# Remove this step from its current position (after line 199)
+
+    - name: Merge firmware custom files
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+
+        mkdir -p files
+        cp -a "$GITHUB_WORKSPACE/custom-files/." files/
+
+        echo "===== Firmware custom files merged ====="
+        find files/etc/openclash/core files/usr/share/openclash/ui/zashboard -maxdepth 2 -type f -printf '%p %s bytes\n' | head -50
 
     - name: Record Embedded Smart Core Version
       working-directory: openwrt
