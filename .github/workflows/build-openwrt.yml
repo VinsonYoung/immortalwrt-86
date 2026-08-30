@@ -99,6 +99,49 @@ jobs:
         git branch --set-upstream-to=origin/dev
         popd
 
+    - name: Patch OpenClash upgrade handling
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+
+        OC_ROOT="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root"
+        UCI_DEFAULTS="$OC_ROOT/etc/uci-defaults/luci-openclash"
+        MAKEFILE="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/Makefile"
+
+        test -f "$UCI_DEFAULTS"
+        test -f "$MAKEFILE"
+
+        echo "===== Patch OpenClash sysupgrade keep.d ====="
+        python3 - "$UCI_DEFAULTS" <<'PY_PATCH'
+        from pathlib import Path
+        import sys
+        p = Path(sys.argv[1])
+        s = p.read_text()
+        old = "cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF\n\n/etc/openclash/\n\nEOF\n"
+        new = "cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF\n\n/etc/openclash/config/\n/etc/openclash/proxy_provider/\n/etc/openclash/rule_provider/\n/etc/openclash/history/\n/etc/openclash/custom/\n/etc/openclash/overwrite/\n/etc/openclash/game_rules/\n/etc/openclash/*.yaml\n/etc/openclash/*.yml\n/etc/openclash/*.json\n/etc/openclash/*.list\n/etc/openclash/*.ipset\n/etc/openclash/*.dat\n/etc/openclash/*.mmdb\n/etc/openclash/*.bin\n\nEOF\n"
+        if old not in s:
+            raise SystemExit('keep.d block not found')
+        p.write_text(s.replace(old, new))
+        PY_PATCH
+
+        echo "===== Patch OpenClash APK preinst/prerm ====="
+        python3 - "$MAKEFILE" <<'PY_PATCH'
+        from pathlib import Path
+        import sys
+        p = Path(sys.argv[1])
+        s = p.read_text()
+        old = 'cp -rf \"/etc/openclash\" \"/tmp/openclash\" >/dev/null 2>&1'
+        new = 'rm -rf \"/tmp/openclash\" >/dev/null 2>&1\ncp -rf \"/etc/openclash\" \"/tmp/openclash\" >/dev/null 2>&1\nrm -rf \"/tmp/openclash/core\" >/dev/null 2>&1'
+        count = s.count(old)
+        if count != 2:
+            raise SystemExit(f'expected 2 backup commands, found {count}')
+        p.write_text(s.replace(old, new))
+        PY_PATCH
+
+        echo "===== Verify OpenClash patches ====="
+        grep -n -A20 -B2 '/lib/upgrade/keep.d/luci-app-openclash' "$UCI_DEFAULTS"
+        grep -n -A8 -B2 'tmp/openclash' "$MAKEFILE"
+
     - name: Download and Embed Smart Mihomo Core from vernesong/mihomo Releases
       working-directory: openwrt
       run: |
@@ -108,7 +151,7 @@ jobs:
         # Source: https://github.com/vernesong/mihomo/releases
         # Download the Prerelease-Alpha amd64-compatible binary, then decompress it
         # and rename it to clash_meta for OpenClash.
-        CORE_DIR="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core"
+        CORE_DIR="$GITHUB_WORKSPACE/custom-files/etc/openclash/core"
         CORE_GZ="/tmp/mihomo-smart-amd64-compatible.gz"
         CORE_BIN="/tmp/mihomo-smart-amd64-compatible"
         RELEASE_TAG="Prerelease-Alpha"
@@ -153,58 +196,6 @@ jobs:
         "$CORE_DIR/clash_meta" -v
         test -x "$CORE_DIR/clash_meta"
 
-    - name: Add OpenClash Core sysupgrade protection
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-        
-        INIT_DIR="package/luci-app-openclash/luci-app-openclash/root/etc/uci-defaults"
-        INIT_SCRIPT="$INIT_DIR/99-openclash-core-sysupgrade"
-        mkdir -p "$INIT_DIR"
-        
-        cat > "$INIT_SCRIPT" <<'EOF_SCRIPT'
-        #!/bin/sh
-        # Preserve OpenClash configuration across sysupgrade, but never preserve
-        # /etc/openclash/core/. The new firmware contains the desired Smart Core.
-        
-        # First upgrade after installing this custom build:
-        # sysupgrade may restore the old Core into OverlayFS upper. Remove ONLY the
-        # upper-layer copy; do not rm the merged /etc/openclash/core/clash_meta path,
-        # because that could create a whiteout and hide the Core embedded in /rom.
-        UPPER_CORE="/overlay/upper/etc/openclash/core/clash_meta"
-        if [ -f "$UPPER_CORE" ] || [ -L "$UPPER_CORE" ]; then
-            rm -f "$UPPER_CORE"
-        fi
-        
-        mkdir -p /lib/upgrade/keep.d
-        
-        # Keep OpenClash user data/configuration, but exclude the core directory.
-        cat > /lib/upgrade/keep.d/luci-app-openclash <<'EOF_KEEP'
-        /etc/openclash/config/
-        /etc/openclash/proxy_provider/
-        /etc/openclash/rule_provider/
-        /etc/openclash/history/
-        /etc/openclash/custom/
-        /etc/openclash/game_rules/
-        /etc/openclash/overwrite/
-        /etc/openclash/cache.db
-        /etc/openclash/*.yaml
-        /etc/openclash/*.yml
-        /etc/openclash/*.json
-        /etc/openclash/*.list
-        /etc/openclash/*.ipset
-        /etc/openclash/*.dat
-        /etc/openclash/*.mmdb
-        /etc/openclash/*.bin
-        EOF_KEEP
-        
-        exit 0
-        EOF_SCRIPT
-        
-        chmod 755 "$INIT_SCRIPT"
-        
-        echo "===== Verify OpenClash Core sysupgrade protection ====="
-        sed -n '1,120p' "$INIT_SCRIPT"
 
     - name: Record Embedded Smart Core Version
       working-directory: openwrt
@@ -222,17 +213,17 @@ jobs:
         cat "$CORE_VERSION_FILE"
 
         echo "===== Embedded Smart Core ====="
-        CORE="package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core/clash_meta"
+        CORE="files/etc/openclash/core/clash_meta"
         "$CORE" -v
 
-    - name: Verify OpenClash Smart Core Package File
+    - name: Verify OpenClash Smart Core in firmware files
       working-directory: openwrt
       run: |
         set -e
-        CORE="package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core/clash_meta"
+        CORE="files/etc/openclash/core/clash_meta"
         test -f "$CORE"
         test -x "$CORE"
-        echo "OpenClash Smart Core is ready: $CORE"
+        echo "OpenClash Smart Core is ready for firmware rootfs: $CORE"
         ls -lh "$CORE"
     
     - name: Download and Embed Latest Zashboard
@@ -242,7 +233,7 @@ jobs:
 
         # 将 Zashboard 最新 Release 的 dist.zip 直接编译进 OpenClash。
         # 目标目录：/usr/share/openclash/ui/zashboard/
-        ZASHBOARD_PATH="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/usr/share/openclash/ui/zashboard"
+        ZASHBOARD_PATH="$GITHUB_WORKSPACE/custom-files/usr/share/openclash/ui/zashboard"
         ZASHBOARD_ZIP="/tmp/zashboard-dist.zip"
         ZASHBOARD_TMP="/tmp/zashboard-extract"
 
@@ -308,6 +299,41 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Merge firmware custom files
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+
+        mkdir -p files
+        cp -a "$GITHUB_WORKSPACE/custom-files/." files/
+
+        echo "===== Firmware custom files merged ====="
+        find files/etc/openclash/core files/usr/share/openclash/ui/zashboard -maxdepth 2 -type f -printf '%p %s bytes\n' | head -50
+
+    - name: Verify firmware-injected OpenClash files
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+
+        CORE="$GITHUB_WORKSPACE/custom-files/etc/openclash/core/clash_meta"
+        UI="$GITHUB_WORKSPACE/custom-files/usr/share/openclash/ui/zashboard/index.html"
+        PKG_CORE="package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core/clash_meta"
+
+        test -f "$CORE"
+        test -x "$CORE"
+        test -f "$UI"
+        test ! -e "$PKG_CORE"
+
+        echo "===== Firmware Core ====="
+        ls -lh "$CORE"
+        sha256sum "$CORE"
+        file "$CORE"
+        "$CORE" -v
+
+        echo "===== Zashboard ====="
+        ls -lh "$UI"
+        echo "Firmware-injected Core and Zashboard verified."
 
     - name: SSH connection to Actions
       uses: P3TERX/ssh2actions@v1.0.0
@@ -446,4 +472,3 @@ jobs:
           fi
           i=$((i + 1))
         done < <(gh api "repos/${REPO}/releases" --paginate --jq '.[] | .tag_name')
-        
