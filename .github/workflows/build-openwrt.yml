@@ -101,63 +101,87 @@ jobs:
       working-directory: openwrt
       run: |
         set -euo pipefail
-        
+
         OC_ROOT="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root"
         UCI_DEFAULTS="$OC_ROOT/etc/uci-defaults/luci-openclash"
-        
+        MAKEFILE="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/Makefile"
+
         test -f "$UCI_DEFAULTS"
-        
+        test -f "$MAKEFILE"
+
         echo "===== Patch OpenClash sysupgrade keep.d and restore ====="
         python3 - "$UCI_DEFAULTS" <<'PY_PATCH'
         from pathlib import Path
-        import re, sys
-        
+        import sys
+
         p = Path(sys.argv[1])
-        s = p.read_text(encoding="utf-8")
-        
-        # Match the whole heredoc without depending on blank-line formatting.
-        pattern = re.compile(
-            r'(?ms)^[ \t]*cat > "/lib/upgrade/keep\\.d/luci-app-openclash" <<-EOF[ \t]*\n'
-            r'.*?^[ \t]*EOF[ \t]*$'
-        )
-        
-        replacement = """cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF
-        /etc/openclash/config/
-        /etc/openclash/proxy_provider/
-        /etc/openclash/rule_provider/
-        /etc/openclash/history/
-        /etc/openclash/custom/
-        /etc/openclash/overwrite/
-        /etc/openclash/game_rules/
-        /etc/openclash/*.yaml
-        /etc/openclash/*.yml
-        /etc/openclash/*.json
-        /etc/openclash/*.list
-        /etc/openclash/*.ipset
-        /etc/openclash/*.dat
-        /etc/openclash/*.mmdb
-        /etc/openclash/*.bin
-        EOF"""
-        
-        s, n = pattern.subn(replacement, s, count=1)
-        if n != 1:
-            raise SystemExit(f"keep.d block not found (matches={n})")
-        
-        # When OpenClash restores its saved data on first boot, do NOT restore the old Core.
+        lines = p.read_text(encoding="utf-8").splitlines()
+        needle = 'cat > "/lib/upgrade/keep.d/luci-app-openclash" <<-EOF'
+        starts = [i for i, line in enumerate(lines) if line.strip() == needle]
+        if len(starts) != 1:
+            raise SystemExit(f"keep.d opener count = {len(starts)}, expected 1")
+        start = starts[0]
+        end = None
+        for i in range(start + 1, len(lines)):
+            if lines[i].strip() == "EOF":
+                end = i
+                break
+        if end is None:
+            raise SystemExit("keep.d heredoc terminator EOF not found")
+        keep_body = [
+            needle,
+            "/etc/openclash/config/",
+            "/etc/openclash/proxy_provider/",
+            "/etc/openclash/rule_provider/",
+            "/etc/openclash/history/",
+            "/etc/openclash/custom/",
+            "/etc/openclash/overwrite/",
+            "/etc/openclash/game_rules/",
+            "/etc/openclash/*.yaml",
+            "/etc/openclash/*.yml",
+            "/etc/openclash/*.json",
+            "/etc/openclash/*.list",
+            "/etc/openclash/*.ipset",
+            "/etc/openclash/*.dat",
+            "/etc/openclash/*.mmdb",
+            "/etc/openclash/*.bin",
+            "EOF",
+        ]
+        lines[start:end + 1] = keep_body
         restore = 'cp -rf "/tmp/openclash/." "/etc/openclash/" >/dev/null 2>&1'
-        insert = 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1\n\t' + restore
-        if restore not in s:
-            raise SystemExit("OpenClash restore command not found")
-        s = s.replace(restore, insert, 1)
-        
-        p.write_text(s, encoding="utf-8")
+        indices = [i for i, line in enumerate(lines) if line.strip() == restore]
+        if len(indices) != 1:
+            raise SystemExit(f"restore command count = {len(indices)}, expected 1")
+        idx = indices[0]
+        indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+        lines.insert(idx, indent + 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1')
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
         PY_PATCH
-        
-        echo "===== Verify OpenClash source patch ====="
-        grep -n -A20 -B2 '/lib/upgrade/keep.d/luci-app-openclash' "$UCI_DEFAULTS"
-        grep -n -A4 -B3 '/tmp/openclash/core' "$UCI_DEFAULTS"
-        if grep -qE '^/etc/openclash/core/?$' "$UCI_DEFAULTS"; then
-          echo "ERROR: OpenClash keep.d still includes /etc/openclash/core"
+
+        echo "===== Patch OpenClash APK preinst/prerm ====="
+        python3 - "$MAKEFILE" <<'PY_PATCH'
+        from pathlib import Path
+        import sys
+
+        p = Path(sys.argv[1])
+        lines = p.read_text(encoding="utf-8").splitlines()
+        needle = 'cp -rf "/etc/openclash" "/tmp/openclash" >/dev/null 2>&1'
+        indices = [i for i, line in enumerate(lines) if line.strip() == needle]
+        if len(indices) != 2:
+            raise SystemExit(f"backup command count = {len(indices)}, expected 2")
+        for idx in reversed(indices):
+            indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+            lines.insert(idx + 1, indent + 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1')
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        PY_PATCH
+
+        echo "===== Verify OpenClash patches ====="
+        sed -n '/lib\/upgrade\/keep\.d\/luci-app-openclash/,/^EOF/p' "$UCI_DEFAULTS"
+        grep -n -A3 -B2 '/tmp/openclash/core' "$UCI_DEFAULTS"
+        grep -n -A4 -B2 '/tmp/openclash/core' "$MAKEFILE"
+
+        if grep -A20 'lib/upgrade/keep.d/luci-app-openclash' "$UCI_DEFAULTS" | grep -qx '/etc/openclash/'; then
+          echo "ERROR: whole /etc/openclash/ keep rule still present"
           exit 1
         fi
     - name: Load custom feeds
