@@ -87,9 +87,7 @@ jobs:
     - name: Install custom packages
       working-directory: openwrt
       run: |
-        set -e
-
-        mkdir -p package/luci-app-openclash
+        mkdir package/luci-app-openclash
         pushd package/luci-app-openclash
         git init
         git remote add -f origin https://github.com/vernesong/OpenClash.git
@@ -97,190 +95,71 @@ jobs:
         echo "luci-app-openclash" >> .git/info/sparse-checkout
         git pull --depth 1 origin dev
         git branch --set-upstream-to=origin/dev
-        popd
-
-    - name: Patch OpenClash upgrade handling
+        popd        
+    
+    - name: Patch OpenClash upgrade restore and keep rules
       working-directory: openwrt
       run: |
         set -euo pipefail
-
+        
         OC_ROOT="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root"
         UCI_DEFAULTS="$OC_ROOT/etc/uci-defaults/luci-openclash"
-        MAKEFILE="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/Makefile"
-
-        test -f "$UCI_DEFAULTS" || { echo "::warning::UCI_DEFAULTS not found at $UCI_DEFAULTS"; exit 0; }
-        test -f "$MAKEFILE" || { echo "::warning::MAKEFILE not found at $MAKEFILE"; exit 0; }
-
-        echo "===== Patch OpenClash sysupgrade keep.d ====="
+        
+        test -f "$UCI_DEFAULTS"
+        
+        echo "===== Patch OpenClash sysupgrade keep.d and restore ====="
         python3 - "$UCI_DEFAULTS" <<'PY_PATCH'
         from pathlib import Path
-        import sys
+        import re, sys
+        
         p = Path(sys.argv[1])
-        s = p.read_text()
-        old = "cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF\n\n/etc/openclash/\n\nEOF\n"
-        new = "cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF\n\n/etc/openclash/config/\n/etc/openclash/proxy_provider/\n/etc/openclash/rule_provider/\n/etc/openclash/history/\n/etc/openclash/providers/\n\nEOF\n"
-        if old not in s:
-            print("::warning::keep.d block not found in UCI_DEFAULTS, skipping patch")
-            sys.exit(0)
-        p.write_text(s.replace(old, new))
+        s = p.read_text(encoding="utf-8")
+        
+        # Match the whole heredoc without depending on blank-line formatting.
+        pattern = re.compile(
+            r'(?ms)^[ \t]*cat > "/lib/upgrade/keep\\.d/luci-app-openclash" <<-EOF[ \t]*\n'
+            r'.*?^[ \t]*EOF[ \t]*$'
+        )
+        
+        replacement = """cat > \"/lib/upgrade/keep.d/luci-app-openclash\" <<-EOF
+        /etc/openclash/config/
+        /etc/openclash/proxy_provider/
+        /etc/openclash/rule_provider/
+        /etc/openclash/history/
+        /etc/openclash/custom/
+        /etc/openclash/overwrite/
+        /etc/openclash/game_rules/
+        /etc/openclash/*.yaml
+        /etc/openclash/*.yml
+        /etc/openclash/*.json
+        /etc/openclash/*.list
+        /etc/openclash/*.ipset
+        /etc/openclash/*.dat
+        /etc/openclash/*.mmdb
+        /etc/openclash/*.bin
+        EOF"""
+        
+        s, n = pattern.subn(replacement, s, count=1)
+        if n != 1:
+            raise SystemExit(f"keep.d block not found (matches={n})")
+        
+        # When OpenClash restores its saved data on first boot, do NOT restore the old Core.
+        restore = 'cp -rf "/tmp/openclash/." "/etc/openclash/" >/dev/null 2>&1'
+        insert = 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1\n\t' + restore
+        if restore not in s:
+            raise SystemExit("OpenClash restore command not found")
+        s = s.replace(restore, insert, 1)
+        
+        p.write_text(s, encoding="utf-8")
         PY_PATCH
-
-        echo "===== Patch OpenClash APK preinst/prerm ====="
-        python3 - "$MAKEFILE" <<'PY_PATCH'
-        from pathlib import Path
-        import sys
-        p = Path(sys.argv[1])
-        s = p.read_text()
-        old = 'cp -rf \"/etc/openclash\" \"/tmp/openclash\" >/dev/null 2>&1'
-        new = 'rm -rf \"/tmp/openclash\" >/dev/null 2>&1\ncp -rf \"/etc/openclash\" \"/tmp/openclash\" >/dev/null 2>&1\nrm -rf \"/tmp/openclash/core\" >/dev/null 2>&1'
-        count = s.count(old)
-        if count != 2:
-            raise SystemExit(f'expected 2 backup commands, found {count}')
-        p.write_text(s.replace(old, new))
-        PY_PATCH
-
-        echo "===== Verify OpenClash patches ====="
+        
+        echo "===== Verify OpenClash source patch ====="
         grep -n -A20 -B2 '/lib/upgrade/keep.d/luci-app-openclash' "$UCI_DEFAULTS"
-        grep -n -A8 -B2 'tmp/openclash' "$MAKEFILE"
-
-    - name: Download and Embed Smart Mihomo Core from vernesong/mihomo Releases
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-        
-        # ImmortalWrt 25.12.x x86-64 / OpenClash Smart Core.
-        # Source: https://github.com/vernesong/mihomo/releases
-        # Download the Prerelease-Alpha amd64-compatible binary, then decompress it
-        # and rename it to clash_meta for OpenClash.
-        CORE_DIR="$GITHUB_WORKSPACE/custom-files/etc/openclash/core"
-        CORE_GZ="/tmp/mihomo-smart-amd64-compatible.gz"
-        CORE_BIN="/tmp/mihomo-smart-amd64-compatible"
-        RELEASE_TAG="Prerelease-Alpha"
-        RELEASE_API="https://api.github.com/repos/vernesong/mihomo/releases/tags/${RELEASE_TAG}"
-        
-        mkdir -p "$CORE_DIR"
-        rm -f "$CORE_GZ" "$CORE_BIN"
-        
-        echo "===== Query vernesong/mihomo Release ====="
-        RELEASE_JSON="$(curl -fsSL --retry 3 --retry-delay 2 "$RELEASE_API")"
-        RELEASE_NAME="$(printf '%s' "$RELEASE_JSON" | jq -r '.name')"
-        echo "Release: $RELEASE_NAME"
-        
-        DOWNLOAD_URL="$(printf '%s' "$RELEASE_JSON" \
-          | jq -r '.assets[] | select(.name | test("^mihomo-linux-amd64-compatible-.*\\.gz$")) | .browser_download_url' \
-          | head -n 1)"
-        
-        test -n "$DOWNLOAD_URL"
-        echo "Download URL: $DOWNLOAD_URL"
-        
-        echo "===== Download Smart Core ====="
-        curl -fL --retry 3 --retry-delay 2 \
-          "$DOWNLOAD_URL" \
-          -o "$CORE_GZ"
-        
-        echo "===== Verify gzip archive ====="
-        gzip -t "$CORE_GZ"
-        
-        echo "===== Extract Smart Core ====="
-        gzip -dc "$CORE_GZ" > "$CORE_BIN"
-        
-        test -f "$CORE_BIN"
-        test -s "$CORE_BIN"
-        
-        # OpenClash expects the executable at /etc/openclash/core/clash_meta.
-        cp -f "$CORE_BIN" "$CORE_DIR/clash_meta"
-        chmod 4755 "$CORE_DIR/clash_meta"
-        
-        echo "===== Verify embedded Smart Core ====="
-        ls -lh "$CORE_DIR/clash_meta"
-        file "$CORE_DIR/clash_meta"
-        "$CORE_DIR/clash_meta" -v
-        test -x "$CORE_DIR/clash_meta"
-
-# Remove this step from its current position (after line 199)
-
-    - name: Merge firmware custom files
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-
-        mkdir -p files
-        cp -a "$GITHUB_WORKSPACE/custom-files/." files/
-
-        echo "===== Firmware custom files merged ====="
-        find files/etc/openclash/core files/usr/share/openclash/ui/zashboard -maxdepth 2 -type f -printf '%p %s bytes\n' | head -50
-
-    - name: Record Embedded Smart Core Version
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-
-        CORE_VERSION_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/dev/core_version"
-        CORE_VERSION_FILE="/tmp/openclash-core_version"
-
-        curl -fL --retry 3 --retry-delay 2 \
-          "$CORE_VERSION_URL" \
-          -o "$CORE_VERSION_FILE"
-
-        echo "===== OpenClash core/dev/core_version ====="
-        cat "$CORE_VERSION_FILE"
-
-        echo "===== Embedded Smart Core ====="
-        CORE="files/etc/openclash/core/clash_meta"
-        "$CORE" -v
-
-    - name: Verify OpenClash Smart Core in firmware files
-      working-directory: openwrt
-      run: |
-        set -e
-        CORE="files/etc/openclash/core/clash_meta"
-        test -f "$CORE"
-        test -x "$CORE"
-        echo "OpenClash Smart Core is ready for firmware rootfs: $CORE"
-        ls -lh "$CORE"
-    
-    - name: Download and Embed Latest Zashboard
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-
-        # 将 Zashboard 最新 Release 的 dist.zip 直接编译进 OpenClash。
-        # 目标目录：/usr/share/openclash/ui/zashboard/
-        ZASHBOARD_PATH="$GITHUB_WORKSPACE/custom-files/usr/share/openclash/ui/zashboard"
-        ZASHBOARD_ZIP="/tmp/zashboard-dist.zip"
-        ZASHBOARD_TMP="/tmp/zashboard-extract"
-
-        echo "===== Download latest Zashboard dist.zip ====="
-
-        rm -rf "$ZASHBOARD_TMP" "$ZASHBOARD_ZIP" "$ZASHBOARD_PATH"
-        mkdir -p "$ZASHBOARD_TMP" "$ZASHBOARD_PATH"
-
-        if ! command -v unzip >/dev/null 2>&1; then
-          sudo apt-get update
-          sudo apt-get install -y unzip
+        grep -n -A4 -B3 '/tmp/openclash/core' "$UCI_DEFAULTS"
+        if grep -qE '^/etc/openclash/core/?$' "$UCI_DEFAULTS"; then
+          echo "ERROR: OpenClash keep.d still includes /etc/openclash/core"
+          exit 1
         fi
-
-        curl -fL --retry 3 --retry-delay 2 \
-          "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip" \
-          -o "$ZASHBOARD_ZIP"
-
-        echo "===== Verify Zashboard ZIP ====="
-        unzip -tq "$ZASHBOARD_ZIP"
-
-        echo "===== Extract Zashboard ====="
-        unzip -q -o "$ZASHBOARD_ZIP" -d "$ZASHBOARD_TMP"
-
-        # 官方 dist.zip 的内容位于 dist/ 目录。
-        test -f "$ZASHBOARD_TMP/dist/index.html"
-
-        cp -a "$ZASHBOARD_TMP/dist/." "$ZASHBOARD_PATH/"
-
-        echo "===== Verify embedded Zashboard ====="
-        test -f "$ZASHBOARD_PATH/index.html"
-        echo "Zashboard embedded at: $ZASHBOARD_PATH"
-        du -sh "$ZASHBOARD_PATH"
-        find "$ZASHBOARD_PATH" -maxdepth 2 -type f 2>/dev/null | head -20 || true
-
     - name: Load custom feeds
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
@@ -313,40 +192,107 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    - name: Merge firmware custom files
+    - name: Download and Embed Smart Mihomo Core from vernesong/mihomo Releases
       working-directory: openwrt
       run: |
         set -euo pipefail
+        
+        # Smart Core source requested by the user:
+        # https://github.com/vernesong/mihomo/releases
+        # x86-64: amd64-compatible (GOAMD64=v1 equivalent).
+        CORE_DIR="$GITHUB_WORKSPACE/openwrt/files/etc/openclash/core"
+        CORE_GZ="/tmp/mihomo-smart-amd64-compatible.gz"
+        CORE_BIN="/tmp/mihomo-smart-amd64-compatible"
+        RELEASE_TAG="Prerelease-Alpha"
+        RELEASE_API="https://api.github.com/repos/vernesong/mihomo/releases/tags/${RELEASE_TAG}"
+        
+        mkdir -p "$CORE_DIR"
+        rm -f "$CORE_GZ" "$CORE_BIN"
+        
+        echo "===== Query vernesong/mihomo Release ====="
+        RELEASE_JSON="$(curl -fsSL --retry 3 --retry-delay 2 "$RELEASE_API")"
+        RELEASE_NAME="$(printf '%s' "$RELEASE_JSON" | jq -r '.name')"
+        echo "Release: $RELEASE_NAME"
+        
+        DOWNLOAD_URL="$(printf '%s' "$RELEASE_JSON" \
+          | jq -r '.assets[] | select(.name | test("^mihomo-linux-amd64-compatible-.*\\.gz$")) | .browser_download_url' \
+          | head -n 1)"
+        
+        test -n "$DOWNLOAD_URL"
+        echo "Download URL: $DOWNLOAD_URL"
+        
+        curl -fL --retry 3 --retry-delay 2 "$DOWNLOAD_URL" -o "$CORE_GZ"
+        gzip -t "$CORE_GZ"
+        gzip -dc "$CORE_GZ" > "$CORE_BIN"
+        test -s "$CORE_BIN"
+        
+        # This is the file OpenClash expects at runtime.
+        cp -f "$CORE_BIN" "$CORE_DIR/clash_meta"
+        chmod 4755 "$CORE_DIR/clash_meta"
+        
+        echo "===== Verify Smart Core ====="
+        ls -lh "$CORE_DIR/clash_meta"
+        sha256sum "$CORE_DIR/clash_meta"
+        file "$CORE_DIR/clash_meta"
+        "$CORE_DIR/clash_meta" -v
 
-        mkdir -p files
-        cp -a "$GITHUB_WORKSPACE/custom-files/." files/
-
-        echo "===== Firmware custom files merged ====="
-        find files/etc/openclash/core files/usr/share/openclash/ui/zashboard -maxdepth 2 -type f -printf '%p %s bytes\n' | head -50
-
-    - name: Verify firmware-injected OpenClash files
+    - name: Download and Embed Latest Zashboard
       working-directory: openwrt
       run: |
         set -euo pipefail
+        
+        UI_DIR="$GITHUB_WORKSPACE/openwrt/files/usr/share/openclash/ui/zashboard"
+        ZIP="/tmp/zashboard-dist.zip"
+        TMP="/tmp/zashboard-dist"
+        
+        rm -rf "$UI_DIR" "$ZIP" "$TMP"
+        mkdir -p "$UI_DIR" "$TMP"
+        
+        if ! command -v unzip >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y unzip
+        fi
+        
+        echo "===== Download latest Zashboard dist.zip ====="
+        curl -fL --retry 3 --retry-delay 2 \
+          "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip" \
+          -o "$ZIP"
+        
+        unzip -tq "$ZIP"
+        unzip -q -o "$ZIP" -d "$TMP"
+        test -f "$TMP/dist/index.html"
+        cp -a "$TMP/dist/." "$UI_DIR/"
+        test -f "$UI_DIR/index.html"
+        
+        echo "===== Verify Zashboard ====="
+        du -sh "$UI_DIR"
+        ls -lh "$UI_DIR/index.html"
 
-        CORE="$GITHUB_WORKSPACE/custom-files/etc/openclash/core/clash_meta"
-        UI="$GITHUB_WORKSPACE/custom-files/usr/share/openclash/ui/zashboard/index.html"
+    - name: Verify firmware embedded OpenClash files
+      working-directory: openwrt
+      run: |
+        set -euo pipefail
+        
+        CORE="files/etc/openclash/core/clash_meta"
+        UI="files/usr/share/openclash/ui/zashboard/index.html"
         PKG_CORE="package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core/clash_meta"
-
+        
         test -f "$CORE"
         test -x "$CORE"
         test -f "$UI"
         test ! -e "$PKG_CORE"
-
+        
         echo "===== Firmware Core ====="
         ls -lh "$CORE"
         sha256sum "$CORE"
         file "$CORE"
         "$CORE" -v
-
-        echo "===== Zashboard ====="
+        
+        echo "===== Firmware Zashboard ====="
         ls -lh "$UI"
-        echo "Firmware-injected Core and Zashboard verified."
+        
+        echo "===== OpenClash APK must NOT contain clash_meta ====="
+        echo "OK: $PKG_CORE does not exist"
 
     - name: SSH connection to Actions
       uses: P3TERX/ssh2actions@v1.0.0
@@ -404,10 +350,6 @@ jobs:
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        if [ ! -d "openwrt/bin/targets" ]; then
-          echo "::error::Build output directory not found. Compilation likely failed."
-          exit 1
-        fi
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
