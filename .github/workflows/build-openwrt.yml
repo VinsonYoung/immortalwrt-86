@@ -97,29 +97,31 @@ jobs:
         git branch --set-upstream-to=origin/dev
         popd        
     
-    - name: Patch OpenClash upgrade restore and keep rules
+    - name: Patch OpenClash upgrade restore and core handling
       working-directory: openwrt
       run: |
         set -euo pipefail
 
         OC_ROOT="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root"
         UCI_DEFAULTS="$OC_ROOT/etc/uci-defaults/luci-openclash"
+        INIT_SCRIPT="$OC_ROOT/etc/init.d/openclash"
         MAKEFILE="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/Makefile"
 
         test -f "$UCI_DEFAULTS"
+        test -f "$INIT_SCRIPT"
         test -f "$MAKEFILE"
 
-        echo "===== Patch OpenClash sysupgrade keep.d and restore ====="
+        echo "===== Patch OpenClash keep.d ====="
         python3 - "$UCI_DEFAULTS" <<'PY_PATCH'
         from pathlib import Path
         import sys
 
         p = Path(sys.argv[1])
         lines = p.read_text(encoding="utf-8").splitlines()
-        needle = 'cat > "/lib/upgrade/keep.d/luci-app-openclash" <<-EOF'
-        starts = [i for i, line in enumerate(lines) if line.strip() == needle]
+        opener = 'cat > "/lib/upgrade/keep.d/luci-app-openclash" <<-EOF'
+        starts = [i for i, line in enumerate(lines) if line.strip() == opener]
         if len(starts) != 1:
-            raise SystemExit(f"keep.d opener count = {len(starts)}, expected 1")
+            raise SystemExit(f"keep.d opener count={len(starts)}, expected 1")
         start = starts[0]
         end = None
         for i in range(start + 1, len(lines)):
@@ -127,9 +129,10 @@ jobs:
                 end = i
                 break
         if end is None:
-            raise SystemExit("keep.d heredoc terminator EOF not found")
-        keep_body = [
-            needle,
+            raise SystemExit("keep.d EOF not found")
+
+        body = [
+            opener,
             "/etc/openclash/config/",
             "/etc/openclash/proxy_provider/",
             "/etc/openclash/rule_provider/",
@@ -147,18 +150,28 @@ jobs:
             "/etc/openclash/*.bin",
             "EOF",
         ]
-        lines[start:end + 1] = keep_body
-        restore = 'cp -rf "/tmp/openclash/." "/etc/openclash/" >/dev/null 2>&1'
-        indices = [i for i, line in enumerate(lines) if line.strip() == restore]
-        if len(indices) != 1:
-            raise SystemExit(f"restore command count = {len(indices)}, expected 1")
-        idx = indices[0]
-        indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
-        lines.insert(idx, indent + 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1')
+        lines[start:end+1] = body
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
         PY_PATCH
 
-        echo "===== Patch OpenClash APK preinst/prerm ====="
+        echo "===== Patch OpenClash init: never restore old /tmp/etc/openclash/core ====="
+        python3 - "$INIT_SCRIPT" <<'PY_PATCH'
+        from pathlib import Path
+        import sys
+
+        p = Path(sys.argv[1])
+        lines = p.read_text(encoding="utf-8").splitlines()
+        old = 'mv "/tmp/etc/openclash/core/" "/etc/openclash"'
+        idx = [i for i, line in enumerate(lines) if line.strip() == old]
+        if len(idx) != 1:
+            raise SystemExit(f'expected exactly 1 core restore command, found {len(idx)}')
+        i = idx[0]
+        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+        lines[i] = indent + 'rm -rf "/tmp/etc/openclash/core"'
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        PY_PATCH
+
+        echo "===== Patch OpenClash APK preinst/prerm: exclude core from temporary backup ====="
         python3 - "$MAKEFILE" <<'PY_PATCH'
         from pathlib import Path
         import sys
@@ -166,24 +179,35 @@ jobs:
         p = Path(sys.argv[1])
         lines = p.read_text(encoding="utf-8").splitlines()
         needle = 'cp -rf "/etc/openclash" "/tmp/openclash" >/dev/null 2>&1'
-        indices = [i for i, line in enumerate(lines) if line.strip() == needle]
-        if len(indices) != 2:
-            raise SystemExit(f"backup command count = {len(indices)}, expected 2")
-        for idx in reversed(indices):
-            indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
-            lines.insert(idx + 1, indent + 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1')
+        idx = [i for i, line in enumerate(lines) if line.strip() == needle]
+        if len(idx) != 2:
+            raise SystemExit(f'expected 2 OpenClash temp-backup commands, found {len(idx)}')
+        for i in reversed(idx):
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+            lines.insert(i + 1, indent + 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1')
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
         PY_PATCH
 
-        echo "===== Verify OpenClash patches ====="
+        echo "===== Verify patches ====="
+        echo "--- keep.d ---"
         sed -n '/lib\/upgrade\/keep\.d\/luci-app-openclash/,/^EOF/p' "$UCI_DEFAULTS"
-        grep -n -A3 -B2 '/tmp/openclash/core' "$UCI_DEFAULTS"
-        grep -n -A4 -B2 '/tmp/openclash/core' "$MAKEFILE"
+        echo "--- init core handling ---"
+        grep -n -A2 -B2 '/tmp/etc/openclash/core' "$INIT_SCRIPT"
+        echo "--- APK temp backup ---"
+        grep -n -A2 -B2 '/tmp/openclash/core' "$MAKEFILE"
 
         if grep -A20 'lib/upgrade/keep.d/luci-app-openclash' "$UCI_DEFAULTS" | grep -qx '/etc/openclash/'; then
           echo "ERROR: whole /etc/openclash/ keep rule still present"
           exit 1
         fi
+
+        if grep -Fxq 'mv "/tmp/etc/openclash/core/" "/etc/openclash"' "$INIT_SCRIPT"; then
+          echo "ERROR: old /tmp/etc/openclash/core restore command still present"
+          exit 1
+        fi
+
+        echo "OpenClash patch verification: OK"
+
     - name: Load custom feeds
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
