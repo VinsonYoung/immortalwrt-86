@@ -72,6 +72,11 @@ jobs:
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
 
+    - name: Setup Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.27'    
+
     - name: Clone source code
       run: |
         df -hT $PWD
