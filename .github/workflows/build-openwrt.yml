@@ -73,9 +73,10 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
 
     - name: Setup Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.27'    
+        go-version: '1.27.1'
+        cache: false  
 
     - name: Clone source code
       run: |
@@ -372,11 +373,6 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Setup Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.27.3'    
-
     - name: Compile the firmware
       id: compile
       run: |
@@ -440,7 +436,7 @@ jobs:
 
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
         [ -f openwrt/wget/op_version1 ] && echo "release_tag=$(cat openwrt/wget/op_version1)" >> $GITHUB_OUTPUT || echo "release_tag=ImmortalWrt_${{ env.FILE_DATE }}" >> $GITHUB_OUTPUT
         git -C openwrt log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt
