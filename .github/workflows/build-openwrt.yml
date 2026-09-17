@@ -372,6 +372,11 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.27.3'    
+
     - name: Compile the firmware
       id: compile
       run: |
