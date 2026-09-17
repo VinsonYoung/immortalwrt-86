@@ -402,12 +402,22 @@ jobs:
     
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        cd openwrt/bin/targets/*/*
+        set -euo pipefail
+        shopt -s nullglob
+
+        targets=(openwrt/bin/targets/*/*)
+        if [ "${#targets[@]}" -ne 1 ]; then
+          echo "Expected exactly one firmware target directory, found ${#targets[@]}"
+          find openwrt/bin -maxdepth 4 -type d 2>/dev/null || true
+          exit 1
+        fi
+
+        cd "${targets[0]}"
         rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+        echo "status=success" >> "$GITHUB_OUTPUT"
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@v6
