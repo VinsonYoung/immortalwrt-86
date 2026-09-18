@@ -115,15 +115,20 @@ jobs:
     - name: Install custom packages
       working-directory: openwrt
       run: |
-        mkdir package/luci-app-openclash
-        pushd package/luci-app-openclash
-        git init
-        git remote add -f origin https://github.com/vernesong/OpenClash.git
-        git config core.sparsecheckout true
-        echo "luci-app-openclash" >> .git/info/sparse-checkout
-        git pull --depth 1 origin dev
-        git branch --set-upstream-to=origin/dev
-        popd        
+        set -euo pipefail
+        git config --global http.version HTTP/1.1
+        git config --global http.lowSpeedLimit 0
+        git config --global http.lowSpeedTime 999999
+
+        rm -rf package/luci-app-openclash
+
+        git clone --depth 1 --branch dev \
+          --filter=blob:none \
+          --sparse \
+          https://github.com/vernesong/OpenClash.git \
+          package/luci-app-openclash
+
+        git -C package/luci-app-openclash sparse-checkout set luci-app-openclash        
     
     - name: Patch OpenClash upgrade restore and core handling
       working-directory: openwrt
