@@ -133,6 +133,40 @@ jobs:
           cd openwrt
           ./scripts/feeds install -a
 
+      - name: Remove old OpenClash feed package
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+
+          echo "===== Before cleanup ====="
+          find package/feeds \
+            \( -type l -o -type d -o -type f \) \
+            -name 'luci-app-openclash' \
+            -print || true
+
+          find package/feeds \
+            \( -type l -o -type d -o -type f \) \
+            -name 'luci-app-openclash' \
+            -exec rm -rf {} +
+
+          echo "===== After cleanup ====="
+          find package/feeds \
+            \( -type l -o -type d -o -type f \) \
+            -name 'luci-app-openclash' \
+            -print || true
+
+          if find package/feeds \
+            \( -type l -o -type d -o -type f \) \
+            -name 'luci-app-openclash' \
+            -print -quit |
+            grep -q .
+          then
+            echo "ERROR: luci-app-openclash still exists under package/feeds"
+            exit 1
+          fi
+
+          echo "OK: old OpenClash feed package removed"    
+
       - name: Install OpenClash dev package
         working-directory: openwrt
         run: |
