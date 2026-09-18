@@ -15,15 +15,10 @@ on:
   workflow_dispatch:
     inputs:
       ssh:
-        description: 'SSH connection to Actions'
+        description: SSH connection to Actions
         required: false
-        default: 'false'
-#   watch:
-#     types: started
-    
-  #schedule:
-     #- cron: 00 22 * * *
-    
+        default: false
+
 env:
   REPO_URL: --single-branch --filter=blob:none https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-25.12
@@ -44,489 +39,725 @@ jobs:
     if: github.event.repository.owner.id == github.event.sender.id
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v5
 
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: true
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: false  # 强制保留交换空间，防止多线程编译时内存(OOM)溢出
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
 
-    - name: Check free space
-      run: |
-        echo "Free space after cleanup:"
-        df -hT
+      - name: Check free space
+        run: df -hT
 
-    - name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo timedatectl set-timezone "$TZ"
+      - name: Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "$TZ"
 
-    - name: Setup Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.27.1'
-        cache: false  
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
 
-    - name: Clone source code
-      run: |
-        df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+      - name: Clone source code
+        run: |
+          df -hT "$PWD"
+          git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
 
-    - name: Force OpenWrt host Go toolchain to 1.27
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
+      - name: Force OpenWrt host Go toolchain to 1.27
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
 
-        # Force OpenWrt's Go feed to 1.27 so xray-core's go.mod matches
-        for f in \
-          feeds/packages/lang/golang/version.mk \
-          feeds/packages/lang/golang/Makefile
-        do
-          if [ -f "$f" ]; then
-            sed -i 's/1\.26\.[0-9]*/1.27.1/g' "$f" || true
-            sed -i 's/1\.26/1.27/g' "$f" || true
+          for f in \
+            feeds/packages/lang/golang/version.mk \
+            feeds/packages/lang/golang/Makefile
+          do
+            if [ -f "$f" ]; then
+              sed -i 's/1\.26\.[0-9]*/1.27.1/g' "$f" || true
+              sed -i 's/1\.26/1.27/g' "$f" || true
+            fi
+          done
+
+          rm -rf staging_dir/host build_dir/host
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 暂时禁用旧缓存，避免复用 0.47.156 等旧版 OpenClash 包。
+      # 确认版本和升级内核均正常后，再考虑恢复此缓存。
+      #
+      # - name: Cache
+      #   uses: klever1988/cachewrtbuild@main
+      #   with:
+      #     ccache: 'true'
+      #     clean: 'true'
+      #     prefix: ${{ github.workspace }}/openwrt
+
+      - name: Install OpenClash dev package
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+
+          git config --global http.version HTTP/1.1
+          git config --global http.lowSpeedLimit 0
+          git config --global http.lowSpeedTime 999999
+
+          rm -rf package/luci-app-openclash
+
+          git clone \
+            --depth 1 \
+            --single-branch \
+            --branch dev \
+            --filter=blob:none \
+            --sparse \
+            https://github.com/vernesong/OpenClash.git \
+            package/luci-app-openclash
+
+          git -C package/luci-app-openclash sparse-checkout set luci-app-openclash
+
+          echo "===== OpenClash Git information ====="
+          git -C package/luci-app-openclash status
+          git -C package/luci-app-openclash branch --show-current
+          git -C package/luci-app-openclash log -1 --oneline
+
+          test "$(git -C package/luci-app-openclash branch --show-current)" = "dev"
+
+          OC_MAKEFILE="package/luci-app-openclash/luci-app-openclash/Makefile"
+          test -f "$OC_MAKEFILE"
+
+          echo "===== OpenClash source version ====="
+          grep -E '^(PKG_NAME|PKG_VERSION):=' "$OC_MAKEFILE"
+
+          # 清理旧的 OpenClash 编译结果，防止误用历史包。
+          find build_dir -type d -iname '*openclash*' \
+            -exec rm -rf {} + 2>/dev/null || true
+
+          find bin -type f -iname '*openclash*.ipk' \
+            -delete 2>/dev/null || true
+
+      - name: Patch OpenClash upgrade handling
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+
+          OC_ROOT="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root"
+          UCI_DEFAULTS="$OC_ROOT/etc/uci-defaults/luci-openclash"
+          INIT_SCRIPT="$OC_ROOT/etc/init.d/openclash"
+          MAKEFILE="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/Makefile"
+
+          test -f "$UCI_DEFAULTS"
+          test -f "$INIT_SCRIPT"
+          test -f "$MAKEFILE"
+
+          echo "===== Patch OpenClash keep.d ====="
+
+          python3 - "$UCI_DEFAULTS" <<'PY_PATCH'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          lines = p.read_text(encoding="utf-8").splitlines()
+
+          opener = 'cat > "/lib/upgrade/keep.d/luci-app-openclash" <<-EOF'
+          starts = [
+              i for i, line in enumerate(lines)
+              if line.strip() == opener
+          ]
+
+          if len(starts) != 1:
+              raise SystemExit(
+                  f"keep.d opener count={len(starts)}, expected 1"
+              )
+
+          start = starts[0]
+          end = None
+
+          for i in range(start + 1, len(lines)):
+              if lines[i].strip() == "EOF":
+                  end = i
+                  break
+
+          if end is None:
+              raise SystemExit("keep.d EOF not found")
+
+          body = [
+              opener,
+              "/etc/openclash/config/",
+              "/etc/openclash/proxy_provider/",
+              "/etc/openclash/rule_provider/",
+              "/etc/openclash/history/",
+              "/etc/openclash/custom/",
+              "/etc/openclash/overwrite/",
+              "/etc/openclash/game_rules/",
+              "/etc/openclash/*.yaml",
+              "/etc/openclash/*.yml",
+              "/etc/openclash/*.json",
+              "/etc/openclash/*.list",
+              "/etc/openclash/*.ipset",
+              "/etc/openclash/*.dat",
+              "/etc/openclash/*.mmdb",
+              "/etc/openclash/*.bin",
+              "EOF",
+          ]
+
+          lines[start:end + 1] = body
+          p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY_PATCH
+
+          echo "===== Patch OpenClash init script ====="
+
+          python3 - "$INIT_SCRIPT" <<'PY_PATCH'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          lines = p.read_text(encoding="utf-8").splitlines()
+
+          old = 'mv "/tmp/etc/openclash/core/" "/etc/openclash"'
+          indexes = [
+              i for i, line in enumerate(lines)
+              if line.strip() == old
+          ]
+
+          if len(indexes) != 1:
+              raise SystemExit(
+                  f"expected exactly 1 core restore command, found {len(indexes)}"
+              )
+
+          i = indexes[0]
+          indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+
+          # 不恢复旧内核，避免升级后覆盖新内核。
+          lines[i] = indent + 'rm -rf "/tmp/etc/openclash/core"'
+
+          p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY_PATCH
+
+          echo "===== Patch OpenClash package backup ====="
+
+          python3 - "$MAKEFILE" <<'PY_PATCH'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          lines = p.read_text(encoding="utf-8").splitlines()
+
+          needle = 'cp -rf "/etc/openclash" "/tmp/openclash" >/dev/null 2>&1'
+          indexes = [
+              i for i, line in enumerate(lines)
+              if line.strip() == needle
+          ]
+
+          if len(indexes) != 2:
+              raise SystemExit(
+                  f"expected 2 OpenClash temp-backup commands, found {len(indexes)}"
+              )
+
+          for i in reversed(indexes):
+              indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+              lines.insert(
+                  i + 1,
+                  indent + 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1'
+              )
+
+          p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY_PATCH
+
+          echo "===== Verify OpenClash patches ====="
+
+          sed -n \
+            '/lib\/upgrade\/keep\.d\/luci-app-openclash/,/^EOF/p' \
+            "$UCI_DEFAULTS"
+
+          grep -n -A2 -B2 \
+            '/tmp/etc/openclash/core' \
+            "$INIT_SCRIPT"
+
+          grep -n -A2 -B2 \
+            '/tmp/openclash/core' \
+            "$MAKEFILE"
+
+          if grep -A20 \
+            'lib/upgrade/keep.d/luci-app-openclash' \
+            "$UCI_DEFAULTS" | grep -qx '/etc/openclash/'
+          then
+            echo "ERROR: whole /etc/openclash/ keep rule still exists"
+            exit 1
           fi
-        done
 
-        # Remove stale host toolchain/build cache; otherwise Go 1.26 may still be reused
-        rm -rf staging_dir/host build_dir/host
-
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a    
-   
-    - name: Cache
-      uses: klever1988/cachewrtbuild@main
-      with:
-        ccache: 'true'
-        clean: 'false'
-        prefix: ${{ github.workspace }}/openwrt
-
-    - name: Install custom packages
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-        git config --global http.version HTTP/1.1
-        git config --global http.lowSpeedLimit 0
-        git config --global http.lowSpeedTime 999999
-
-        rm -rf package/luci-app-openclash
-
-        git clone --depth 1 --branch dev \
-          --filter=blob:none \
-          --sparse \
-          https://github.com/vernesong/OpenClash.git \
-          package/luci-app-openclash
-
-        git -C package/luci-app-openclash sparse-checkout set luci-app-openclash        
-    
-    - name: Patch OpenClash upgrade restore and core handling
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-
-        OC_ROOT="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root"
-        UCI_DEFAULTS="$OC_ROOT/etc/uci-defaults/luci-openclash"
-        INIT_SCRIPT="$OC_ROOT/etc/init.d/openclash"
-        MAKEFILE="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/Makefile"
-
-        test -f "$UCI_DEFAULTS"
-        test -f "$INIT_SCRIPT"
-        test -f "$MAKEFILE"
-
-        echo "===== Patch OpenClash keep.d ====="
-        python3 - "$UCI_DEFAULTS" <<'PY_PATCH'
-        from pathlib import Path
-        import sys
-
-        p = Path(sys.argv[1])
-        lines = p.read_text(encoding="utf-8").splitlines()
-        opener = 'cat > "/lib/upgrade/keep.d/luci-app-openclash" <<-EOF'
-        starts = [i for i, line in enumerate(lines) if line.strip() == opener]
-        if len(starts) != 1:
-            raise SystemExit(f"keep.d opener count={len(starts)}, expected 1")
-        start = starts[0]
-        end = None
-        for i in range(start + 1, len(lines)):
-            if lines[i].strip() == "EOF":
-                end = i
-                break
-        if end is None:
-            raise SystemExit("keep.d EOF not found")
-
-        body = [
-            opener,
-            "/etc/openclash/config/",
-            "/etc/openclash/proxy_provider/",
-            "/etc/openclash/rule_provider/",
-            "/etc/openclash/history/",
-            "/etc/openclash/custom/",
-            "/etc/openclash/overwrite/",
-            "/etc/openclash/game_rules/",
-            "/etc/openclash/*.yaml",
-            "/etc/openclash/*.yml",
-            "/etc/openclash/*.json",
-            "/etc/openclash/*.list",
-            "/etc/openclash/*.ipset",
-            "/etc/openclash/*.dat",
-            "/etc/openclash/*.mmdb",
-            "/etc/openclash/*.bin",
-            "EOF",
-        ]
-        lines[start:end+1] = body
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        PY_PATCH
-
-        echo "===== Patch OpenClash init: never restore old /tmp/etc/openclash/core ====="
-        python3 - "$INIT_SCRIPT" <<'PY_PATCH'
-        from pathlib import Path
-        import sys
-
-        p = Path(sys.argv[1])
-        lines = p.read_text(encoding="utf-8").splitlines()
-        old = 'mv "/tmp/etc/openclash/core/" "/etc/openclash"'
-        idx = [i for i, line in enumerate(lines) if line.strip() == old]
-        if len(idx) != 1:
-            raise SystemExit(f'expected exactly 1 core restore command, found {len(idx)}')
-        i = idx[0]
-        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-        lines[i] = indent + 'rm -rf "/tmp/etc/openclash/core"'
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        PY_PATCH
-
-        echo "===== Patch OpenClash APK preinst/prerm: exclude core from temporary backup ====="
-        python3 - "$MAKEFILE" <<'PY_PATCH'
-        from pathlib import Path
-        import sys
-
-        p = Path(sys.argv[1])
-        lines = p.read_text(encoding="utf-8").splitlines()
-        needle = 'cp -rf "/etc/openclash" "/tmp/openclash" >/dev/null 2>&1'
-        idx = [i for i, line in enumerate(lines) if line.strip() == needle]
-        if len(idx) != 2:
-            raise SystemExit(f'expected 2 OpenClash temp-backup commands, found {len(idx)}')
-        for i in reversed(idx):
-            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-            lines.insert(i + 1, indent + 'rm -rf "/tmp/openclash/core" >/dev/null 2>&1')
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        PY_PATCH
-
-        echo "===== Verify patches ====="
-        echo "--- keep.d ---"
-        sed -n '/lib\/upgrade\/keep\.d\/luci-app-openclash/,/^EOF/p' "$UCI_DEFAULTS"
-        echo "--- init core handling ---"
-        grep -n -A2 -B2 '/tmp/etc/openclash/core' "$INIT_SCRIPT"
-        echo "--- APK temp backup ---"
-        grep -n -A2 -B2 '/tmp/openclash/core' "$MAKEFILE"
-
-        if grep -A20 'lib/upgrade/keep.d/luci-app-openclash' "$UCI_DEFAULTS" | grep -qx '/etc/openclash/'; then
-          echo "ERROR: whole /etc/openclash/ keep rule still present"
-          exit 1
-        fi
-
-        if grep -Fxq 'mv "/tmp/etc/openclash/core/" "/etc/openclash"' "$INIT_SCRIPT"; then
-          echo "ERROR: old /tmp/etc/openclash/core restore command still present"
-          exit 1
-        fi
-
-        echo "OpenClash patch verification: OK"
-
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-    
-    - name: romupdate2
-      run: |
-        cd openwrt/package
-        git clone https://github.com/VinsonYoung/romupdate2.git
-        
-    - name: lenyu
-      run: |
-        cd openwrt
-        bash $GITHUB_WORKSPACE/lenyu.sh
-
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-      
-               
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-
-    - name: Download and Embed Smart Mihomo Core from vernesong/mihomo Releases
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-        
-        # Smart Core source requested by the user:
-        # https://github.com/vernesong/mihomo/releases
-        # x86-64: amd64-compatible (GOAMD64=v1 equivalent).
-        CORE_DIR="$GITHUB_WORKSPACE/openwrt/files/etc/openclash/core"
-        CORE_GZ="/tmp/mihomo-smart-amd64-compatible.gz"
-        CORE_BIN="/tmp/mihomo-smart-amd64-compatible"
-        RELEASE_TAG="Prerelease-Alpha"
-        RELEASE_API="https://api.github.com/repos/vernesong/mihomo/releases/tags/${RELEASE_TAG}"
-        
-        mkdir -p "$CORE_DIR"
-        rm -f "$CORE_GZ" "$CORE_BIN"
-        
-        echo "===== Query vernesong/mihomo Release ====="
-        RELEASE_JSON="$(curl -fsSL --retry 3 --retry-delay 2 "$RELEASE_API")"
-        RELEASE_NAME="$(printf '%s' "$RELEASE_JSON" | jq -r '.name')"
-        echo "Release: $RELEASE_NAME"
-        
-        DOWNLOAD_URL="$(printf '%s' "$RELEASE_JSON" \
-          | jq -r '.assets[] | select(.name | test("^mihomo-linux-amd64-compatible-.*\\.gz$")) | .browser_download_url' \
-          | head -n 1)"
-        
-        test -n "$DOWNLOAD_URL"
-        echo "Download URL: $DOWNLOAD_URL"
-        
-        curl -fL --retry 3 --retry-delay 2 "$DOWNLOAD_URL" -o "$CORE_GZ"
-        gzip -t "$CORE_GZ"
-        gzip -dc "$CORE_GZ" > "$CORE_BIN"
-        test -s "$CORE_BIN"
-        
-        # This is the file OpenClash expects at runtime.
-        cp -f "$CORE_BIN" "$CORE_DIR/clash_meta"
-        chmod 4755 "$CORE_DIR/clash_meta"
-        
-        echo "===== Verify Smart Core ====="
-        ls -lh "$CORE_DIR/clash_meta"
-        sha256sum "$CORE_DIR/clash_meta"
-        file "$CORE_DIR/clash_meta"
-        "$CORE_DIR/clash_meta" -v
-
-    - name: Download and Embed Latest Zashboard
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-        
-        UI_DIR="$GITHUB_WORKSPACE/openwrt/files/usr/share/openclash/ui/zashboard"
-        ZIP="/tmp/zashboard-dist.zip"
-        TMP="/tmp/zashboard-dist"
-        
-        rm -rf "$UI_DIR" "$ZIP" "$TMP"
-        mkdir -p "$UI_DIR" "$TMP"
-        
-        if ! command -v unzip >/dev/null 2>&1; then
-          sudo apt-get update
-          sudo apt-get install -y unzip
-        fi
-        
-        echo "===== Download latest Zashboard dist.zip ====="
-        curl -fL --retry 3 --retry-delay 2 \
-          "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip" \
-          -o "$ZIP"
-        
-        unzip -tq "$ZIP"
-        unzip -q -o "$ZIP" -d "$TMP"
-        test -f "$TMP/dist/index.html"
-        cp -a "$TMP/dist/." "$UI_DIR/"
-        test -f "$UI_DIR/index.html"
-        
-        echo "===== Verify Zashboard ====="
-        du -sh "$UI_DIR"
-        ls -lh "$UI_DIR/index.html"
-
-    - name: Verify firmware embedded OpenClash files
-      working-directory: openwrt
-      run: |
-        set -euo pipefail
-        
-        CORE="files/etc/openclash/core/clash_meta"
-        UI="files/usr/share/openclash/ui/zashboard/index.html"
-        PKG_CORE="package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core/clash_meta"
-        
-        test -f "$CORE"
-        test -x "$CORE"
-        test -f "$UI"
-        test ! -e "$PKG_CORE"
-        
-        echo "===== Firmware Core ====="
-        ls -lh "$CORE"
-        sha256sum "$CORE"
-        file "$CORE"
-        "$CORE" -v
-        
-        echo "===== Firmware Zashboard ====="
-        ls -lh "$UI"
-        
-        echo "===== OpenClash APK must NOT contain clash_meta ====="
-        echo "OK: $PKG_CORE does not exist"
-
-    - name: SSH connection to Actions
-      uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
-      env:
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
-    - name: Download package
-      id: package
-      run: |
-        cd openwrt
-        echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
-        
-        # ☢️ 终极必杀技：专门对付 Host 架构的硬编码流氓判定
-        # 锁定带有 download-ci-llvm 的行，把里面的 true 全部干掉换成 false！
-        # 无论源码怎么变，它的判定逻辑最终都会变成 (...,false,false)，彻底断绝下载行为。
-        if [ -f feeds/packages/lang/rust/Makefile ]; then
-          sed -i '/download-ci-llvm/ s/true/false/g' feeds/packages/lang/rust/Makefile
-        fi
-
-    - name: Check OpenWrt Go version
-      working-directory: openwrt
-      run: |
-        set -eux
-        if [ -x staging_dir/host/bin/go ]; then
-          staging_dir/host/bin/go version
-        fi
-        
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-
-    - name: Compile the firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@v6
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
-   
-    - name: delete files
-      run: |
-        cd openwrt
-        bash $GITHUB_WORKSPACE/rename.sh
-    
-    - name: Organize files
-      id: organize
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      run: |
-        set -euo pipefail
-        shopt -s nullglob
-
-        targets=(openwrt/bin/targets/*/*)
-        if [ "${#targets[@]}" -ne 1 ]; then
-          echo "Expected exactly one firmware target directory, found ${#targets[@]}"
-          find openwrt/bin -maxdepth 4 -type d 2>/dev/null || true
-          exit 1
-        fi
-
-        cd "${targets[0]}"
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
-        echo "status=success" >> "$GITHUB_OUTPUT"
-
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@v6
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
-
-    - name: Upload firmware to cowtransfer
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to WeTransfer
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-    - name: Generate release tag
-      id: tag
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        [ -f openwrt/wget/op_version1 ] && echo "release_tag=$(cat openwrt/wget/op_version1)" >> $GITHUB_OUTPUT || echo "release_tag=ImmortalWrt_${{ env.FILE_DATE }}" >> $GITHUB_OUTPUT
-        git -C openwrt log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt
-        git -C openwrt/feeds/packages log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
-        git -C openwrt/feeds/luci log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
-        git -C openwrt/feeds/routing log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
-        git -C openwrt/feeds/telephony log --pretty=format:"%s(#By %an)" --graph --since=3.hour | sed '/^$/d' >> release.txt || true
-        git -C openwrt/feeds/helloworld log --pretty=format:"%s(#By %an)" --graph --since=8.hour | sed '/^$/d' >> release.txt || true
-        [ -d openwrt/feeds/passwall ] && git -C openwrt/feeds/passwall log --pretty=format:"%s(#By %an)" --graph --since=8.hour | sed '/^$/d' >> release.txt || true
-        test  ! -s release.txt && echo -e "\n* The source code is not updated." >> release.txt
-        sed -i '1i ## Firmware Update Log' release.txt
-        [ "$UPLOAD_COWTRANSFER" == "true" ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ "$UPLOAD_WETRANSFER" == "true" ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v3
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.op_update }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
-        # prerelease: true
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
-      with:
-        retain_days: 2
-        keep_minimum_runs: 10
-
-    - name: Remove old Releases
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      env:
-        GH_TOKEN: ${{ secrets.op_update }}
-      run: |
-        set -euo pipefail
-        REPO="${{ github.repository }}"
-        KEEP=10
-        i=0
-        while IFS= read -r tag; do
-          if [ "$i" -ge "$KEEP" ]; then
-            echo "Deleting release (and tag): $tag"
-            gh release delete "$tag" --yes --cleanup-tag -R "$REPO" || true
+          if grep -Fxq \
+            'mv "/tmp/etc/openclash/core/" "/etc/openclash"' \
+            "$INIT_SCRIPT"
+          then
+            echo "ERROR: old core restore command still exists"
+            exit 1
           fi
-          i=$((i + 1))
-        done < <(gh api "repos/${REPO}/releases" --paginate --jq '.[] | .tag_name')
+
+          echo "OpenClash patch verification: OK"
+
+      - name: Load custom feeds
+        run: |
+          [ -e "$FEEDS_CONF" ] && mv "$FEEDS_CONF" openwrt/feeds.conf.default
+          chmod +x "$DIY_P1_SH"
+          cd openwrt
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
+
+      - name: Install romupdate2
+        run: |
+          cd openwrt/package
+          rm -rf romupdate2
+          git clone --depth 1 https://github.com/VinsonYoung/romupdate2.git
+
+      - name: Run lenyu
+        run: |
+          cd openwrt
+          bash "$GITHUB_WORKSPACE/lenyu.sh"
+
+      - name: Update feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+
+      - name: Install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds install -a
+
+      - name: Load custom configuration
+        run: |
+          [ -e files ] && mv files openwrt/files
+          [ -e "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
+          chmod +x "$DIY_P2_SH"
+          cd openwrt
+          "$GITHUB_WORKSPACE/$DIY_P2_SH"
+
+      - name: Download and embed Mihomo clash_meta
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+
+          CORE_DIR="$GITHUB_WORKSPACE/openwrt/files/etc/openclash/core"
+          PKG_CORE_DIR="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core"
+
+          CORE_GZ="/tmp/mihomo-smart-amd64-compatible.gz"
+          CORE_BIN="/tmp/mihomo-smart-amd64-compatible"
+
+          RELEASE_TAG="Prerelease-Alpha"
+          RELEASE_API="https://api.github.com/repos/vernesong/mihomo/releases/tags/${RELEASE_TAG}"
+
+          mkdir -p "$CORE_DIR"
+          mkdir -p "$PKG_CORE_DIR"
+
+          rm -f "$CORE_GZ" "$CORE_BIN"
+          rm -f "$CORE_DIR/clash_meta"
+          rm -f "$PKG_CORE_DIR/clash_meta"
+
+          echo "===== Query Mihomo release ====="
+
+          RELEASE_JSON="$(
+            curl -fsSL \
+              --retry 3 \
+              --retry-delay 2 \
+              "$RELEASE_API"
+          )"
+
+          RELEASE_NAME="$(printf '%s' "$RELEASE_JSON" | jq -r '.name')"
+          echo "Release: $RELEASE_NAME"
+
+          DOWNLOAD_URL="$(
+            printf '%s' "$RELEASE_JSON" |
+              jq -r '
+                .assets[]
+                | select(
+                    .name
+                    | test("^mihomo-linux-amd64-compatible-.*\\.gz$")
+                  )
+                | .browser_download_url
+              ' |
+              head -n 1
+          )"
+
+          test -n "$DOWNLOAD_URL"
+          echo "Download URL: $DOWNLOAD_URL"
+
+          curl -fL \
+            --retry 3 \
+            --retry-delay 2 \
+            "$DOWNLOAD_URL" \
+            -o "$CORE_GZ"
+
+          gzip -t "$CORE_GZ"
+          gzip -dc "$CORE_GZ" > "$CORE_BIN"
+          test -s "$CORE_BIN"
+
+          # 1. 放入固件 overlay。
+          cp -f "$CORE_BIN" "$CORE_DIR/clash_meta"
+          chmod 4755 "$CORE_DIR/clash_meta"
+
+          # 2. 放入 OpenClash 安装包。
+          #    升级重新安装 luci-app-openclash 时会重新写入该文件。
+          cp -f "$CORE_BIN" "$PKG_CORE_DIR/clash_meta"
+          chmod 4755 "$PKG_CORE_DIR/clash_meta"
+
+          echo "===== Verify firmware core ====="
+          ls -lh "$CORE_DIR/clash_meta"
+          sha256sum "$CORE_DIR/clash_meta"
+          file "$CORE_DIR/clash_meta"
+          "$CORE_DIR/clash_meta" -v
+
+          echo "===== Verify package core ====="
+          ls -lh "$PKG_CORE_DIR/clash_meta"
+          sha256sum "$PKG_CORE_DIR/clash_meta"
+          file "$PKG_CORE_DIR/clash_meta"
+
+      - name: Download and embed Zashboard
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+
+          UI_DIR="$GITHUB_WORKSPACE/openwrt/files/usr/share/openclash/ui/zashboard"
+          ZIP="/tmp/zashboard-dist.zip"
+          TMP="/tmp/zashboard-dist"
+
+          rm -rf "$UI_DIR" "$ZIP" "$TMP"
+          mkdir -p "$UI_DIR" "$TMP"
+
+          if ! command -v unzip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y unzip
+          fi
+
+          curl -fL \
+            --retry 3 \
+            --retry-delay 2 \
+            "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip" \
+            -o "$ZIP"
+
+          unzip -tq "$ZIP"
+          unzip -q -o "$ZIP" -d "$TMP"
+
+          test -f "$TMP/dist/index.html"
+
+          cp -a "$TMP/dist/." "$UI_DIR/"
+          test -f "$UI_DIR/index.html"
+
+          echo "===== Verify Zashboard ====="
+          du -sh "$UI_DIR"
+          ls -lh "$UI_DIR/index.html"
+
+      - name: Verify embedded OpenClash files
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+
+          CORE="files/etc/openclash/core/clash_meta"
+          UI="files/usr/share/openclash/ui/zashboard/index.html"
+          PKG_CORE="package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core/clash_meta"
+          OC_MAKEFILE="package/luci-app-openclash/luci-app-openclash/Makefile"
+
+          echo "===== Verify OpenClash branch ====="
+          git -C package/luci-app-openclash branch --show-current
+          git -C package/luci-app-openclash log -1 --oneline
+
+          test "$(git -C package/luci-app-openclash branch --show-current)" = "dev"
+
+          echo "===== Verify OpenClash version ====="
+          grep -E '^(PKG_NAME|PKG_VERSION):=' "$OC_MAKEFILE"
+
+          echo "===== Verify firmware core ====="
+          test -f "$CORE"
+          test -x "$CORE"
+          ls -lh "$CORE"
+          sha256sum "$CORE"
+          file "$CORE"
+          "$CORE" -v
+
+          echo "===== Verify package core ====="
+          test -f "$PKG_CORE"
+          test -x "$PKG_CORE"
+          ls -lh "$PKG_CORE"
+          sha256sum "$PKG_CORE"
+          file "$PKG_CORE"
+
+          echo "===== Verify Zashboard ====="
+          test -f "$UI"
+          ls -lh "$UI"
+
+          echo "OpenClash verification: OK"
+
+      - name: SSH connection to Actions
+        uses: P3TERX/ssh2actions@v1.0.0
+        if: |
+          (github.event.inputs.ssh == 'true' &&
+           github.event.inputs.ssh != 'false') ||
+          contains(github.event.action, 'ssh')
+        env:
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+      - name: Prepare configuration
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+
+          echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
+
+          if [ -f feeds/packages/lang/rust/Makefile ]; then
+            sed -i '/download-ci-llvm/ s/true/false/g' \
+              feeds/packages/lang/rust/Makefile
+          fi
+
+      - name: Check OpenWrt Go version and download packages
+        working-directory: openwrt
+        run: |
+          set -eux
+
+          if [ -x staging_dir/host/bin/go ]; then
+            staging_dir/host/bin/go version
+          fi
+
+          make defconfig
+          make download -j8
+
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile the firmware
+        id: compile
+        run: |
+          set -euo pipefail
+
+          cd openwrt
+
+          echo "$(nproc) thread compile"
+
+          make -j"$(nproc)" || make -j1 || make -j1 V=s
+
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+          grep '^CONFIG_TARGET.*DEVICE.*=y' .config |
+            sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+
+          if [ -s DEVICE_NAME ]; then
+            echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
+          fi
+
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
+
+      - name: Check space usage
+        if: "!cancelled()"
+        run: df -hT
+
+      - name: Upload bin directory
+        uses: actions/upload-artifact@v6
+        if: |
+          steps.compile.outputs.status == 'success' &&
+          env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: openwrt/bin
+
+      - name: Rename files
+        run: |
+          cd openwrt
+          bash "$GITHUB_WORKSPACE/rename.sh"
+
+      - name: Organize files
+        id: organize
+        if: |
+          steps.compile.outputs.status == 'success' &&
+          env.UPLOAD_FIRMWARE == 'true' &&
+          !cancelled()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          targets=(openwrt/bin/targets/*/*)
+
+          if [ "${#targets[@]}" -ne 1 ]; then
+            echo "Expected exactly one firmware target directory, found ${#targets[@]}"
+            find openwrt/bin -maxdepth 4 -type d 2>/dev/null || true
+            exit 1
+          fi
+
+          cd "${targets[0]}"
+
+          rm -rf packages
+
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware directory
+        uses: actions/upload-artifact@v6
+        if: |
+          steps.organize.outputs.status == 'success' &&
+          !cancelled()
+        with:
+          name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE }}
+
+      - name: Upload firmware to cowtransfer
+        id: cowtransfer
+        if: |
+          steps.organize.outputs.status == 'success' &&
+          env.UPLOAD_COWTRANSFER == 'true' &&
+          !cancelled()
+        run: |
+          curl -fsSL git.io/file-transfer | sh
+          ./transfer cow \
+            --block 2621440 \
+            -s -p 64 \
+            --no-progress \
+            "${FIRMWARE}" 2>&1 | tee cowtransfer.log
+
+          echo "::warning file=cowtransfer.com::$(grep https cowtransfer.log)"
+          echo "url=$(grep https cowtransfer.log | cut -f3 -d' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware to WeTransfer
+        id: wetransfer
+        if: |
+          steps.organize.outputs.status == 'success' &&
+          env.UPLOAD_WETRANSFER == 'true' &&
+          !cancelled()
+        run: |
+          curl -fsSL git.io/file-transfer | sh
+          ./transfer wet \
+            -s -p 16 \
+            --no-progress \
+            "${FIRMWARE}" 2>&1 | tee wetransfer.log
+
+          echo "::warning file=wetransfer.com::$(grep https wetransfer.log)"
+          echo "url=$(grep https wetransfer.log | cut -f3 -d' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release tag
+        id: tag
+        if: |
+          steps.organize.outputs.status == 'success' &&
+          env.UPLOAD_RELEASE == 'true' &&
+          !cancelled()
+        run: |
+          if [ -f openwrt/wget/op_version1 ]; then
+            echo "release_tag=$(cat openwrt/wget/op_version1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_tag=ImmortalWrt_${{ env.FILE_DATE }}" >> "$GITHUB_OUTPUT"
+          fi
+
+          git -C openwrt log \
+            --pretty=format:"%s(#By %an)" \
+            --graph \
+            --since=3.hour |
+            sed '/^$/d' >> release.txt
+
+          git -C openwrt/feeds/packages log \
+            --pretty=format:"%s(#By %an)" \
+            --graph \
+            --since=3.hour |
+            sed '/^$/d' >> release.txt || true
+
+          git -C openwrt/feeds/luci log \
+            --pretty=format:"%s(#By %an)" \
+            --graph \
+            --since=3.hour |
+            sed '/^$/d' >> release.txt || true
+
+          git -C openwrt/feeds/routing log \
+            --pretty=format:"%s(#By %an)" \
+            --graph \
+            --since=3.hour |
+            sed '/^$/d' >> release.txt || true
+
+          git -C openwrt/feeds/telephony log \
+            --pretty=format:"%s(#By %an)" \
+            --graph \
+            --since=3.hour |
+            sed '/^$/d' >> release.txt || true
+
+          git -C openwrt/feeds/helloworld log \
+            --pretty=format:"%s(#By %an)" \
+            --graph \
+            --since=8.hour |
+            sed '/^$/d' >> release.txt || true
+
+          if [ -d openwrt/feeds/passwall ]; then
+            git -C openwrt/feeds/passwall log \
+              --pretty=format:"%s(#By %an)" \
+              --graph \
+              --since=8.hour |
+              sed '/^$/d' >> release.txt || true
+          fi
+
+          if [ ! -s release.txt ]; then
+            echo -e "\n* The source code is not updated." >> release.txt
+          fi
+
+          sed -i '1i ## Firmware Update Log' release.txt
+
+          if [ "$UPLOAD_COWTRANSFER" = "true" ]; then
+            echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
+          fi
+
+          if [ "$UPLOAD_WETRANSFER" = "true" ]; then
+            echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
+          fi
+
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v3
+        if: |
+          steps.tag.outputs.status == 'success' &&
+          !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.op_update }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: ${{ env.FIRMWARE }}/*
+
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          retain_days: 2
+          keep_minimum_runs: 10
+
+      - name: Remove old releases
+        if: |
+          env.UPLOAD_RELEASE == 'true' &&
+          !cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.op_update }}
+        run: |
+          set -euo pipefail
+
+          REPO="${{ github.repository }}"
+          KEEP=10
+          i=0
+
+          while IFS= read -r tag; do
+            if [ "$i" -ge "$KEEP" ]; then
+              echo "Deleting release (and tag): $tag"
+              gh release delete "$tag" \
+                --yes \
+                --cleanup-tag \
+                -R "$REPO" || true
+            fi
+
+            i=$((i + 1))
+          done < <(
+            gh api "repos/${REPO}/releases" \
+              --paginate \
+              --jq '.[] | .tag_name'
+          )
