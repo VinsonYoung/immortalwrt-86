@@ -20,7 +20,7 @@ on:
         default: false
 
 env:
-  REPO_URL: --single-branch --filter=blob:none https://github.com/immortalwrt/immortalwrt
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: openwrt-25.12
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .diffconfig
@@ -73,8 +73,15 @@ jobs:
 
       - name: Clone source code
         run: |
+          set -euo pipefail
           df -hT "$PWD"
-          git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
+
+          git clone \
+            --single-branch \
+            --filter=blob:none \
+            --branch "$REPO_BRANCH" \
+            "$REPO_URL" \
+            openwrt
 
       - name: Force OpenWrt host Go toolchain to 1.27
         working-directory: openwrt
