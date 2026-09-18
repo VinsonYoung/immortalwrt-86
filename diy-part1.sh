@@ -16,6 +16,7 @@ sed -i "/helloworld/d" "feeds.conf.default"
 #sed -i "/nikki/d" "feeds.conf.default"
 echo "src-git helloworld https://github.com/fw876/helloworld.git" >> "feeds.conf.default"
 #echo "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main" >> "feeds.conf.default"
+
 # 强行将最新的 PassWall 专属 feed 注入到 feeds.conf.default 的最顶部
 sed -i '1i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
 sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
@@ -36,7 +37,7 @@ touch files/usr/share/Lenyu-pw.sh
 # touch package/base-files/files/etc/sysupgrade.conf
 
 # 修改为源码内部的相对路径
-cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
+cat > package/base-files/files/etc/sysupgrade.conf <<'EOF'
 # ===== 网络与系统配置保留 =====
 /etc/config/dhcp
 /etc/config/sing-box
@@ -45,9 +46,7 @@ cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
 /etc/config/passwall_server
 /etc/config/passwall
 
-# ===== OpenClash 配置保留（仅保留配置文件，不保留内核） =====
-# 注意：/etc/openclash/core/ 和 /usr/share/openclash/ui/ 不保留
-# 这样升级时会使用新编译固件里的内核文件，避免版本不一致
+# ===== OpenClash 配置保留 =====
 /etc/config/openclash
 
 # ===== Passwall 规则保留 =====
@@ -59,12 +58,18 @@ cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
 /usr/bin/sing-box
 /usr/bin/hysteria
 
-# ===== 系统认证与密码保留（防止升级后密码被重置） =====
+# ===== 用户、密码和认证保留 =====
 /etc/shadow
 /etc/shadow-
 /etc/passwd
+/etc/passwd-
 /etc/group
+/etc/group-
 /etc/gshadow
+/etc/gshadow-
+/etc/upgrade-auth-shadow
+
+# ===== 系统认证与密码保留 =====
 /etc/sudoers
 /etc/sudoers.d/
 
@@ -76,8 +81,7 @@ cat>>package/base-files/files/etc/sysupgrade.conf<<-EOF
 /etc/crontabs/root
 EOF
 
-
-cat>rename.sh<<-'EOF'
+cat > rename.sh <<-'EOF'
 #!/bin/bash
 
 TARGET_DIR="bin/targets/x86/64"
@@ -100,7 +104,8 @@ rm -f ${TARGET_DIR}/*-kernel.bin
 rm -f ${TARGET_DIR}/*-rootfs.*
 rm -f ${TARGET_DIR}/*.vmdk
 rm -f ${TARGET_DIR}/*ext4-combined-efi.img.gz
-rm -f ${TARGET_DIR}/*ext4-combined.img.gz# 3. 读取前面 lenyu.sh 注入的自定义版本号
+rm -f ${TARGET_DIR}/*ext4-combined.img.gz
+# 3. 读取前面 lenyu.sh 注入的自定义版本号
 if [ -f "files/etc/lenyu_version" ]; then
     rename_version=$(cat files/etc/lenyu_version)
 else
@@ -157,17 +162,18 @@ ls -1 ${TARGET_DIR} > wget/open_sta_md5
 exit 0
 EOF
 
-cat>lenyu.sh<<-'EOOF'
+cat > lenyu.sh <<-'EOOF'
 #!/bin/bash
 
 # 1. 预先创建需要的目录，防止报错
 mkdir -p wget files/etc
 
 # 2. 生成版本号 (统一使用下划线代替不规范的空格，保证变量安全性)
-lenyu_version="$(date '+%y%m%d%H%M')_sta_Len_yu" 
-echo "$lenyu_version" > wget/DISTRIB_REVISION1 
-echo "$lenyu_version" | cut -d _ -f 1 > files/etc/lenyu_version  
+lenyu_version="$(date '+%y%m%d%H%M')_sta_Len_yu"
+echo "$lenyu_version" > wget/DISTRIB_REVISION1
+echo "$lenyu_version" | cut -d _ -f 1 > files/etc/lenyu_version
 new_DISTRIB_REVISION=$(cat wget/DISTRIB_REVISION1)
+
 # 3.替换 os-release 模板（适配ImmortalWrt 25.12 去除末尾的 %C 以移除 Git commit 号）
 os_release_template="package/base-files/files/usr/lib/os-release"
 [ -f "$os_release_template" ] && sed -i "s|OPENWRT_RELEASE=\"%D %V %C\"|OPENWRT_RELEASE=\"ImmortalWrt 25.12-${new_DISTRIB_REVISION}\"|g" "$os_release_template"
@@ -185,169 +191,226 @@ fi
 if ! grep -q "Check_Update.sh" "$TARGET_FILE"; then
     # 彻底清除文件末尾的 exit 0，防止逻辑中断
     sed -i 's/exit 0//g' "$TARGET_FILE"
-    # 注意：此处 EOF 前不要加斜杠，以允许 $new_DISTRIB_REVISION 变量展开；
-    # 内部包含 $ 的普通命令则使用 \$ 转义。
     cat >> "$TARGET_FILE" <<-EOF
-	sed -i '\$ a alias lenyu="sh /usr/share/Check_Update.sh"' /etc/profile
-	sed -i '/DISTRIB_DESCRIPTION/d' /etc/openwrt_release
-	echo "DISTRIB_DESCRIPTION='$new_DISTRIB_REVISION'" >> /etc/openwrt_release
-	exit 0
-	EOF
+    sed -i '\$ a alias lenyu="sh /usr/share/Check_Update.sh"' /etc/profile
+    sed -i '/DISTRIB_DESCRIPTION/d' /etc/openwrt_release
+    echo "DISTRIB_DESCRIPTION='$new_DISTRIB_REVISION'" >> /etc/openwrt_release
+    exit 0
+    EOF
 fi
 
 # 4. 注入 Lenyu-auto.sh 别名
 if ! grep -q "Lenyu-auto.sh" "$TARGET_FILE"; then
     sed -i 's/exit 0//g' "$TARGET_FILE"
     cat >> "$TARGET_FILE" <<-\EOF
-	sed -i '$ a alias lenyu-auto="sh /usr/share/Lenyu-auto.sh"' /etc/profile
-	exit 0
-	EOF
+    sed -i '$ a alias lenyu-auto="sh /usr/share/Lenyu-auto.sh"' /etc/profile
+    exit 0
+    EOF
 fi
 
 # 5. 注入 Lenyu-pw.sh 别名
 if ! grep -q "Lenyu-pw.sh" "$TARGET_FILE"; then
     sed -i 's/exit 0//g' "$TARGET_FILE"
     cat >> "$TARGET_FILE" <<-\EOF
-	sed -i '$ a alias lenyu-pw="sh /usr/share/Lenyu-pw.sh"' /etc/profile
-	exit 0
-	EOF
+    sed -i '$ a alias lenyu-pw="sh /usr/share/Lenyu-pw.sh"' /etc/profile
+    exit 0
+    EOF
 fi
 
 # 6. 注入 backup.tar.gz 定时恢复逻辑 (rc.local)
 if ! grep -q "custom-backup.tar.gz" "$TARGET_FILE"; then
     sed -i 's/exit 0//g' "$TARGET_FILE"
     cat >> "$TARGET_FILE" <<-\EOF
-	###### 添加定时执行 rc.local 任务
-	# 检查 /etc/crontabs/root 中 rc.local 的出现次数，忽略找不到文件时的报错
-	RC_COUNT=$(grep -c "rc.local" /etc/crontabs/root 2>/dev/null || echo 0)
-	
-	# 删除多余的 rc.local 条目
-	if [ "$RC_COUNT" -gt 1 ]; then
-	    awk '/rc.local/ && !seen {print; seen=1; next} !/rc.local/' /etc/crontabs/root > /tmp/crontabs_root_tmp && mv /tmp/crontabs_root_tmp /etc/crontabs/root
-	    echo "Removed extra rc.local entries, kept one" >> /tmp/restore.log
-	elif [ "$RC_COUNT" -eq 0 ]; then
-	    # 如果没有 rc.local，添加一条
-	    echo "@reboot sleep 60 && bash /etc/rc.local > /dev/null 2>&1 &" >> /etc/crontabs/root
-	    echo "Add rc.local succeeded" >> /tmp/restore.log
-	else
-	    echo "rc.local already exists, no action taken" >> /tmp/restore.log
-	fi
-	
-	##### 覆写 /etc/rc.local 文件内容
-	cat > /etc/rc.local <<-\EOFF
-	# Restoring the ROM configuration file
-	get_smallest_mounted_disk() {
-	    # 使用 lsblk 列出挂载在 /mnt/ 下的设备并过滤掉小于 100M 的设备
-	    lsblk -o NAME,SIZE,MOUNTPOINT | grep "/mnt/" | awk '$2 ~ /[0-9.]+[G]/ || ($2 ~ /[0-9.]+M/ && $2+0 > 100) {print $1, $2}' > /tmp/tmdisk
-	    # 计算最小的磁盘并将其路径存入 tmdisk 变量
-	    tmdisk=/mnt/$(grep "" /tmp/tmdisk | awk '
-	    $2 ~ /M/ {size = $2+0} 
-	    $2 ~ /G/ {size = $2*1024} 
-	    NR == 1 {min = size; line = $1} 
-	    NR > 1 && size < min {min = size; line = $1} 
-	    END {gsub(/[^a-zA-Z0-9]/, "", line); print line}')
-	
-	    # 输出结果
-	    echo "$tmdisk"
-	}
-	
-	# 调用函数并将结果存储到变量
-	disk_path=$(get_smallest_mounted_disk)
-	if [ -f "${disk_path}/custom-backup.tar.gz" ]; then
-	    echo "Restore script already exists: ${disk_path}/custom-backup.tar.gz"
-	    echo "Performing Restore..."
-	    bash /usr/share/custom-restore.sh
-	    echo "Restore completed."
-	    echo "Restore successful $(date '+%Y-%m-%d %H:%M:%S')" >> /tmp/restore.log
-	    
-	    # Restart Passwall service
-	    /etc/init.d/passwall restart
-	    exit 0
-	else
-	    echo "Restore failed: file not found $(date '+%Y-%m-%d %H:%M:%S')" >> /tmp/restore.log
-	    exit 1
-	fi
-	exit 0
-	EOFF
-	exit 0
-	EOF
+    ###### 添加定时执行 rc.local 任务
+    # 检查 /etc/crontabs/root 中 rc.local 的出现次数，忽略找不到文件时的报错
+    RC_COUNT=$(grep -c "rc.local" /etc/crontabs/root 2>/dev/null || echo 0)
+
+    # 删除多余的 rc.local 条目
+    if [ "$RC_COUNT" -gt 1 ]; then
+        awk '/rc.local/ && !seen {print; seen=1; next} !/rc.local/' /etc/crontabs/root > /tmp/crontabs_root_tmp && mv /tmp/crontabs_root_tmp /etc/crontabs/root
+        echo "Removed extra rc.local entries, kept one" >> /tmp/restore.log
+    elif [ "$RC_COUNT" -eq 0 ]; then
+        # 如果没有 rc.local，添加一条
+        echo "@reboot sleep 60 && bash /etc/rc.local > /dev/null 2>&1 &" >> /etc/crontabs/root
+        echo "Add rc.local succeeded" >> /tmp/restore.log
+    else
+        echo "rc.local already exists, no action taken" >> /tmp/restore.log
+    fi
+
+    ##### 覆写 /etc/rc.local 文件内容
+    cat > /etc/rc.local <<-\EOFF
+    # Restoring the ROM configuration file
+    get_smallest_mounted_disk() {
+        # 使用 lsblk 列出挂载在 /mnt/ 下的设备并过滤掉小于 100M 的设备
+        lsblk -o NAME,SIZE,MOUNTPOINT | grep "/mnt/" | awk '$2 ~ /[0-9.]+[G]/ || ($2 ~ /[0-9.]+M/ && $2+0 > 100) {print $1, $2}' > /tmp/tmdisk
+        # 计算最小的磁盘并将其路径存入 tmdisk 变量
+        tmdisk=/mnt/$(grep "" /tmp/tmdisk | awk '
+        $2 ~ /M/ {size = $2+0}
+        $2 ~ /G/ {size = $2*1024}
+        NR == 1 {min = size; line = $1}
+        NR > 1 && size < min {min = size; line = $1}
+        END {gsub(/[^a-zA-Z0-9]/, "", line); print line}')
+
+        # 输出结果
+        echo "$tmdisk"
+    }
+
+    # 调用函数并将结果存储到变量
+    disk_path=$(get_smallest_mounted_disk)
+    if [ -f "${disk_path}/custom-backup.tar.gz" ]; then
+        echo "Restore script already exists: ${disk_path}/custom-backup.tar.gz"
+        echo "Performing Restore..."
+        bash /usr/share/custom-restore.sh
+        echo "Restore completed."
+        echo "Restore successful $(date '+%Y-%m-%d %H:%M:%S')" >> /tmp/restore.log
+
+        # Restart Passwall service
+        /etc/init.d/passwall restart
+        exit 0
+    else
+        echo "Restore failed: file not found $(date '+%Y-%m-%d %H:%M:%S')" >> /tmp/restore.log
+        exit 1
+    fi
+    exit 0
+    EOFF
+    exit 0
+    EOF
 fi
 EOOF
 
-cat>files/usr/share/Check_Update.sh<<-'EOF'
+# ===== 生成统一恢复 root 密码的启动脚本 =====
+mkdir -p files/etc/init.d
+cat > files/etc/init.d/restore-root-auth <<'EOF'
+#!/bin/sh /etc/rc.common
+
+START=99
+
+start() {
+    BACKUP="/etc/upgrade-auth-shadow"
+    SHADOW="/etc/shadow"
+    LOG_DIR="/etc/upgrade-debug"
+    LOG_FILE="$LOG_DIR/auth-restore.log"
+
+    mkdir -p "$LOG_DIR"
+
+    {
+        echo "===== restore root authentication ====="
+        date
+        echo "root before restore:"
+        grep '^root:' "$SHADOW" 2>/dev/null || true
+        echo "root backup:"
+        grep '^root:' "$BACKUP" 2>/dev/null || true
+    } >> "$LOG_FILE"
+
+    if [ ! -s "$BACKUP" ] || ! grep -q '^root:' "$BACKUP"; then
+        echo "backup missing or invalid" >> "$LOG_FILE"
+        return 0
+    fi
+
+    ROOT_LINE="$(grep '^root:' "$BACKUP" | head -n 1)"
+
+    awk -v root_line="$ROOT_LINE" '
+        BEGIN { replaced = 0 }
+        /^root:/ {
+            print root_line
+            replaced = 1
+            next
+        }
+        { print }
+        END {
+            if (!replaced) print root_line
+        }
+    ' "$SHADOW" > /tmp/shadow.restore
+
+    chown root:root /tmp/shadow.restore
+    chmod 0600 /tmp/shadow.restore
+    mv -f /tmp/shadow.restore "$SHADOW"
+
+    {
+        echo "root after restore:"
+        grep '^root:' "$SHADOW" 2>/dev/null || true
+    } >> "$LOG_FILE"
+}
+EOF
+chmod 0755 files/etc/init.d/restore-root-auth
+
+cat > files/usr/share/Check_Update.sh <<-'EOF'
 #!/bin/bash
-# https://github.com/VinsonYoung/Actions-OpenWrt-x86
+# https://github.com/VinsonYoung/immortalwrt-86
 # Actions-OpenWrt-x86 By Lenyu 20210505
 #path=$(dirname $(readlink -f $0))
 # cd ${path}
 #检测准备
 if [ ! -f  "/etc/lenyu_version" ]; then
-	echo
-	echo -e "\033[31m 该脚本在非Lenyu固件上运行，为避免不必要的麻烦���准备退出… \033[0m"
-	echo
-	exit 0
+    echo
+    echo -e "\033[31m 该脚本在非Lenyu固件上运行，为避免不必要的麻烦，准备退出… \033[0m"
+    echo
+    exit 0
 fi
 rm -f /tmp/cloud_version
+
 # 获取固件云端版本号、内核版本号信息
-current_version=`cat /etc/lenyu_version`
+current_version=$(cat /etc/lenyu_version)
 curl -s https://api.github.com/repos/VinsonYoung/immortalwrt-86/releases/latest | grep 'tag_name' | cut -d\" -f4 > /tmp/cloud_ts_version
 sleep 3
 if [ -s  "/tmp/cloud_ts_version" ]; then
-	cloud_version=`cat /tmp/cloud_ts_version | cut -d _ -f 1`
-	cloud_kernel=`cat /tmp/cloud_ts_version | cut -d _ -f 2`
-	#固件下载地址
-	new_version=`cat /tmp/cloud_ts_version`
-	DEV_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
-	DEV_UEFI_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
-	immortalwrt_sta=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta.md5
-	immortalwrt_sta_uefi=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta_uefi.md5
+    cloud_version=$(cat /tmp/cloud_ts_version | cut -d _ -f 1)
+    cloud_kernel=$(cat /tmp/cloud_ts_version | cut -d _ -f 2)
+    new_version=$(cat /tmp/cloud_ts_version)
+    DEV_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
+    DEV_UEFI_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
+    immortalwrt_sta=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta.md5
+    immortalwrt_sta_uefi=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta_uefi.md5
 else
-	echo "请检测网络或重试！"
-	exit 1
+    echo "请检测网络或重试！"
+    exit 1
 fi
 ####
+
 Firmware_Type="$(grep 'DISTRIB_ARCH=' /etc/immortalwrt_release | cut -d \' -f 2)"
 echo $Firmware_Type > /etc/lenyu_firmware_type
 echo
+
 if [[ "$cloud_kernel" =~ "4.19" ]]; then
-	echo
-	echo -e "\033[31m 该脚本在Lenyu固件Sta版本上运行，目前只建议在Dev版本上运行，准备退出… \033[0m"
-	echo
-	exit 0
+    echo
+    echo -e "\033[31m 该脚本在Lenyu固件Sta版本上运行，目前只建议在Dev版本上运行，准备退出… \033[0m"
+    echo
+    exit 0
 fi
+
 #md5值验证，固件类型判断
 if [ ! -d /sys/firmware/efi ];then
-	if [ "$current_version" != "$cloud_version" ];then
-		wget -P /tmp "$DEV_URL" -O /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
-		wget -P /tmp "$immortalwrt_sta" -O /tmp/immortalwrt_sta.md5
-		cd /tmp && md5sum -c immortalwrt_sta.md5
-		if [ $? != 0 ]; then
-      echo "您下载文件失败，请检查网络重试…"
-      sleep 4
-      exit
-		fi
-		Boot_type=logic
-	else
-		echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
-		echo
-		exit
-	fi
+    if [ "$current_version" != "$cloud_version" ];then
+        wget -P /tmp "$DEV_URL" -O /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
+        wget -P /tmp "$immortalwrt_sta" -O /tmp/immortalwrt_sta.md5
+        cd /tmp && md5sum -c immortalwrt_sta.md5
+        if [ $? != 0 ]; then
+            echo "您下载文件失败，请检查网络重试…"
+            sleep 4
+            exit
+        fi
+        Boot_type=logic
+    else
+        echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
+        echo
+        exit
+    fi
 else
-	if [ "$current_version" != "$cloud_version" ];then
-		wget -P /tmp "$DEV_UEFI_URL" -O /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
-		wget -P /tmp "$immortalwrt_sta_uefi" -O /tmp/immortalwrt_sta_uefi.md5
-		cd /tmp && md5sum -c immortalwrt_sta_uefi.md5
-		if [ $? != 0 ]; then
-	  echo "您下载文件失败，请检查网络重试…"
-      sleep 4
-      exit
-		fi
-		Boot_type=efi
-	else
-		echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
-		echo
-		exit
-	fi
+    if [ "$current_version" != "$cloud_version" ];then
+        wget -P /tmp "$DEV_UEFI_URL" -O /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
+        wget -P /tmp "$immortalwrt_sta_uefi" -O /tmp/immortalwrt_sta_uefi.md5
+        cd /tmp && md5sum -c immortalwrt_sta_uefi.md5
+        if [ $? != 0 ]; then
+            echo "您下载文件失败，请检查网络重试…"
+            sleep 4
+            exit
+        fi
+        Boot_type=efi
+    else
+        echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
+        echo
+        exit
+    fi
 fi
 
 open_up()
@@ -357,35 +420,54 @@ clear
 read -n 1 -p  " 您是否要保留配置升级，保留选择Y,否则选N:" num1
 echo
 case $num1 in
-	Y|y)
-	echo
-  echo -e "\033[32m >>>正在准备保留配置升级，请稍后，等待系统重启…-> \033[0m"
-	echo
-	sleep 3
-	if [ ! -d /sys/firmware/efi ];then
-		sysupgrade /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
-	else
-		sysupgrade /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
-	fi
-    ;;
+    Y|y)
+        echo
+        echo -e "\033[32m >>>正在准备保留配置升级，请稍后，等待系统重启…-> \033[0m"
+        echo
+        sleep 3
+
+        # ===== 升级前保存当前 root 密码哈希 =====
+        mkdir -p /etc/upgrade-debug
+        cp -f /etc/shadow /etc/upgrade-auth-shadow
+        chmod 0600 /etc/upgrade-auth-shadow
+        chown root:root /etc/upgrade-auth-shadow
+
+        {
+            echo "===== before preserve-config upgrade ====="
+            date
+            echo "release: $new_version"
+            echo "root shadow before upgrade:"
+            grep '^root:' /etc/shadow
+            echo "independent backup:"
+            grep '^root:' /etc/upgrade-auth-shadow
+            echo "preserved files:"
+            sysupgrade -l | grep -E '(^|/)(shadow|passwd|group|gshadow|upgrade-auth-shadow)(-|$)' || true
+        } > /etc/upgrade-debug/auth-before.log
+
+        if [ ! -d /sys/firmware/efi ];then
+            sysupgrade -v /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
+        else
+            sysupgrade -v /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
+        fi
+        ;;
     n|N)
-    echo
-    echo -e "\033[32m >>>正在准备不保留配置升级，请稍后，等待系统重启…-> \033[0m"
-    echo
-    sleep 3
-	if [ ! -d /sys/firmware/efi ];then
-		sysupgrade -n  /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
-	else
-		sysupgrade -n  /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
-	fi
-    ;;
+        echo
+        echo -e "\033[32m >>>正在准备不保留配置升级，请稍后，等待系统重启…-> \033[0m"
+        echo
+        sleep 3
+        if [ ! -d /sys/firmware/efi ];then
+            sysupgrade -n /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
+        else
+            sysupgrade -n /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
+        fi
+        ;;
     *)
-	  echo
-    echo -e "\033[31m err：只能选择Y/N\033[0m"
-	  echo
-     read -n 1 -p  "请回车继续…"
-	  echo
-	  open_up
+        echo
+        echo -e "\033[31m err：只能选择Y/N\033[0m"
+        echo
+        read -n 1 -p  "请回车继续…"
+        echo
+        open_up
 esac
 }
 
@@ -395,116 +477,148 @@ echo
 read -n 1 -p  " 您确定要升级吗，升级选择Y,否则选N:" num1
 echo
 case $num1 in
-	Y|y)
-	  open_up
-    ;;
-  n|N)
-    echo
-    echo -e "\033[31m >>>您已选择退出固件升级，已经终止脚本…-> \033[0m"
-    echo
-    exit 1
-    ;;
-  *)
-    echo
-    echo -e "\033[31m err：只能选择Y/N\033[0m"
-    echo
-    read -n 1 -p  "请回车继续…"
-    echo
-    open_op
+    Y|y)
+        open_up
+        ;;
+    n|N)
+        echo
+        echo -e "\033[31m >>>您已选择退出固件升级，已经终止脚本…-> \033[0m"
+        echo
+        exit 1
+        ;;
+    *)
+        echo
+        echo -e "\033[31m err：只能选择Y/N\033[0m"
+        echo
+        read -n 1 -p  "请回车继续…"
+        echo
+        open_op
 esac
 }
 open_op
 exit 0
 EOF
 
-cat>files/usr/share/Lenyu-auto.sh<<-'EOF'
+cat > files/usr/share/Lenyu-auto.sh <<-'EOF'
 #!/bin/bash
 # https://github.com/VinsonYoung/immortalwrt-86
 # Actions-OpenWrt-x86 By Lenyu 20210505
 #path=$(dirname $(readlink -f $0))
 # cd ${path}
 #检测准备
+set -e
+
 if [ ! -f  "/etc/lenyu_version" ]; then
-echo
-echo -e "\033[31m 该脚本在非Lenyu固件上运行，为避免不必要的麻烦，准备退出… \033[0m"
-echo
-exit 0
+    echo
+    echo -e "\033[31m 该脚本在非Lenyu固件上运行，为避免不必要的麻烦，准备退出… \033[0m"
+    echo
+    exit 0
 fi
 rm -f /tmp/cloud_version
 
 # 获取固件云端版本号、内核版本号信息
-current_version=`cat /etc/lenyu_version`
-# wget -qO- -T2 "https://api.github.com/repos/VinsonYoung/immortalwrt-86/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g;s/v//g'  > /tmp/clou[...]
-# 因immortalwrt不支持上述格式.
+current_version=$(cat /etc/lenyu_version)
 curl -s https://api.github.com/repos/VinsonYoung/immortalwrt-86/releases/latest | grep 'tag_name' | cut -d\" -f4 > /tmp/cloud_ts_version
 sleep 3
 if [ -s  "/tmp/cloud_ts_version" ]; then
-cloud_version=`cat /tmp/cloud_ts_version | cut -d _ -f 1`
-cloud_kernel=`cat /tmp/cloud_ts_version | cut -d _ -f 2`
-#固件下载地址
-new_version=`cat /tmp/cloud_ts_version` # 2208052057_5.4.203
-DEV_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
-DEV_UEFI_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
-immortalwrt_sta=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta.md5
-immortalwrt_sta_uefi=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta_uefi.md5
+    cloud_version=$(cat /tmp/cloud_ts_version | cut -d _ -f 1)
+    cloud_kernel=$(cat /tmp/cloud_ts_version | cut -d _ -f 2)
+    new_version=$(cat /tmp/cloud_ts_version)
+    DEV_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
+    DEV_UEFI_URL=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
+    immortalwrt_sta=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta.md5
+    immortalwrt_sta_uefi=https://github.com/VinsonYoung/immortalwrt-86/releases/download/${new_version}/immortalwrt_sta_uefi.md5
 else
-echo "请检测网络或重试！"
-exit 1
+    echo "请检测网络或重试！"
+    exit 1
 fi
 ####
+
 Firmware_Type="$(grep 'DISTRIB_ARCH=' /etc/lenyu_version | cut -d \' -f 2)"
 echo $Firmware_Type > /etc/lenyu_firmware_type
 echo
+
 if [[ "$cloud_kernel" =~ "4.19" ]]; then
-echo
-echo -e "\033[31m 该脚本在Lenyu固件Sta版本上运行，目前只建议在Dev版本上运行，准备退出… \033[0m"
-echo
-exit 0
+    echo
+    echo -e "\033[31m 该脚本在Lenyu固件Sta版本上运行，目前只建议在Dev版本上运行，准备退出… \033[0m"
+    echo
+    exit 0
 fi
+
 #md5值验证，固件类型判断
 if [ ! -d /sys/firmware/efi ];then
-if [ "$current_version" != "$cloud_version" ];then
-wget -P /tmp "$DEV_URL" -O /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
-wget -P /tmp "$immortalwrt_sta" -O /tmp/immortalwrt_sta.md5
-cd /tmp && md5sum -c immortalwrt_sta.md5
-if [ $? != 0 ]; then
-  echo "您下载文件失败，请检查网络重试…"
-  sleep 4
-  exit
-fi
-# Backing the ROM configuration file
-bash /usr/share/custom-backup.sh
-# update rom
-sysupgrade /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
+    if [ "$current_version" != "$cloud_version" ];then
+        wget -P /tmp "$DEV_URL" -O /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
+        wget -P /tmp "$immortalwrt_sta" -O /tmp/immortalwrt_sta.md5
+        cd /tmp && md5sum -c immortalwrt_sta.md5
+        if [ $? != 0 ]; then
+            echo "您下载文件失败，请检查网络重试…"
+            sleep 4
+            exit
+        fi
+
+        # ===== 升级前保存当前 root 密码哈希 =====
+        mkdir -p /etc/upgrade-debug
+        cp -f /etc/shadow /etc/upgrade-auth-shadow
+        chmod 0600 /etc/upgrade-auth-shadow
+        chown root:root /etc/upgrade-auth-shadow
+
+        {
+            echo "===== before automatic preserve-config upgrade ====="
+            date
+            echo "release: $new_version"
+            echo "root shadow before upgrade:"
+            grep '^root:' /etc/shadow
+            echo "independent backup:"
+            grep '^root:' /etc/upgrade-auth-shadow
+        } > /etc/upgrade-debug/auth-before.log
+
+        # 不使用 -n，保留配置升级
+        sysupgrade -v /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
+    else
+        echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
+        echo
+        exit
+    fi
 else
-echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
-echo
-exit
-fi
-else
-if [ "$current_version" != "$cloud_version" ];then
-wget -P /tmp "$DEV_UEFI_URL" -O /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
-wget -P /tmp "$immortalwrt_sta_uefi" -O /tmp/immortalwrt_sta_uefi.md5
-cd /tmp && md5sum -c immortalwrt_sta_uefi.md5
-if [ $? != 0 ]; then
-echo "您下载文件失败，请检查网络重试…"
-sleep 1
-exit
-fi
-# Backing the ROM configuration file
-bash /usr/share/custom-backup.sh
-# update rom
-sysupgrade /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
-else
-echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
-echo
-exit
-fi
+    if [ "$current_version" != "$cloud_version" ];then
+        wget -P /tmp "$DEV_UEFI_URL" -O /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
+        wget -P /tmp "$immortalwrt_sta_uefi" -O /tmp/immortalwrt_sta_uefi.md5
+        cd /tmp && md5sum -c immortalwrt_sta_uefi.md5
+        if [ $? != 0 ]; then
+            echo "您下载文件失败，请检查网络重试…"
+            sleep 1
+            exit
+        fi
+
+        # ===== 升级前保存当前 root 密码哈希 =====
+        mkdir -p /etc/upgrade-debug
+        cp -f /etc/shadow /etc/upgrade-auth-shadow
+        chmod 0600 /etc/upgrade-auth-shadow
+        chown root:root /etc/upgrade-auth-shadow
+
+        {
+            echo "===== before automatic preserve-config upgrade ====="
+            date
+            echo "release: $new_version"
+            echo "root shadow before upgrade:"
+            grep '^root:' /etc/shadow
+            echo "independent backup:"
+            grep '^root:' /etc/upgrade-auth-shadow
+        } > /etc/upgrade-debug/auth-before.log
+
+        # 不使用 -n，保留配置升级
+        sysupgrade -v /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
+    else
+        echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
+        echo
+        exit
+    fi
 fi
 exit 0
 EOF
 
-cat>files/usr/share/Lenyu-pw.sh<<-'EOF_PW'
+cat > files/usr/share/Lenyu-pw.sh <<-'EOF_PW'
 #!/bin/sh
 set -u
 set -o pipefail
@@ -563,7 +677,7 @@ current_time=$(date +%s)
 if [ -f "$TIME_MARKFILE" ] && [ -f "/var/opkg-lists/passwall_luci" ]; then
   last_update=$(cat "$TIME_MARKFILE" 2>/dev/null || echo 0)
   age=$((current_time - last_update))
-  
+
   if [ "$age" -lt "$CACHE_TTL" ]; then
     echo_blue "检测到本地软件源索引缓存未过期（小于 $((CACHE_TTL / 3600)) 小时），跳过下载与环境刷新。"
     UPDATE_FLAG=1
@@ -606,17 +720,13 @@ EOF
     echo_red "软件源索引更新失败，请检查网络或 URL 连通性。"
     exit 1
   fi
-  # 只有成功 update 后，才写回私有时间戳
   echo "$current_time" > "$TIME_MARKFILE"
 fi
 
 ########################################
 # 4. 精确版本比对
 ########################################
-# 精确抓取本地已安装版本
 installed_version="$(opkg list-installed | grep '^luci-app-passwall ' | awk '{print $3}')"
-
-# 精确抓取软件源中最新候选版本，并强制只取返回的第一行最高版本
 available_version="$(opkg info luci-app-passwall | grep '^Version:' | awk '{print $2}' | head -n 1)"
 
 installed_version="${installed_version:-未安装}"
@@ -644,7 +754,7 @@ fi
 ########################################
 # 6. 备份自定义规则
 ########################################
-echo_blue "备份��定义规则..."
+echo_blue "备份自定义规则..."
 mkdir -p "$RULE_BACKUP"
 for f in direct_host direct_ip proxy_host; do
   [ -f "$RULE_DIR/$f" ] && cp "$RULE_DIR/$f" "$RULE_BACKUP/$f"
