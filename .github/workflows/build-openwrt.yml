@@ -103,15 +103,35 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 暂时禁用旧缓存，避免复用 0.47.156 等旧版 OpenClash 包。
-      # 确认版本和升级内核均正常后，再考虑恢复此缓存。
-      #
-      # - name: Cache
-      #   uses: klever1988/cachewrtbuild@main
-      #   with:
-      #     ccache: 'true'
-      #     clean: 'true'
-      #     prefix: ${{ github.workspace }}/openwrt
+      - name: Load custom feeds
+        run: |
+          set -euo pipefail
+          [ -e "$FEEDS_CONF" ] && mv "$FEEDS_CONF" openwrt/feeds.conf.default
+          chmod +x "$DIY_P1_SH"
+          cd openwrt
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
+
+      - name: Install romupdate2
+        run: |
+          cd openwrt/package
+          rm -rf romupdate2
+          git clone --depth 1 https://github.com/VinsonYoung/romupdate2.git
+
+      - name: Run lenyu
+        run: |
+          cd openwrt
+          bash "$GITHUB_WORKSPACE/lenyu.sh"
+
+      - name: Update feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+
+      - name: Install feeds
+        run: |
+          set -euo pipefail
+          cd openwrt
+          ./scripts/feeds install -a
 
       - name: Install OpenClash dev package
         working-directory: openwrt
@@ -121,6 +141,19 @@ jobs:
           git config --global http.version HTTP/1.1
           git config --global http.lowSpeedLimit 0
           git config --global http.lowSpeedTime 999999
+
+          echo "===== Remove OpenClash packages installed by feeds ====="
+
+          # Remove old OpenClash packages from feeds or package cache.
+          # Without this, build can still choose a stale package like 0.47.156.
+          find package/feeds -type l \
+            -path '*/luci-app-openclash' \
+            -delete 2>/dev/null || true
+
+          find package/feeds -type d \
+            -path '*/luci-app-openclash' \
+            -prune \
+            -exec rm -rf {} + 2>/dev/null || true
 
           rm -rf package/luci-app-openclash
 
@@ -135,25 +168,29 @@ jobs:
 
           git -C package/luci-app-openclash sparse-checkout set luci-app-openclash
 
-          echo "===== OpenClash Git information ====="
-          git -C package/luci-app-openclash status
-          git -C package/luci-app-openclash branch --show-current
-          git -C package/luci-app-openclash log -1 --oneline
+          OC_DIR="package/luci-app-openclash"
+          OC_MAKEFILE="$OC_DIR/luci-app-openclash/Makefile"
 
-          test "$(git -C package/luci-app-openclash branch --show-current)" = "dev"
-
-          OC_MAKEFILE="package/luci-app-openclash/luci-app-openclash/Makefile"
+          test -d "$OC_DIR"
           test -f "$OC_MAKEFILE"
 
-          echo "===== OpenClash source version ====="
+          echo "===== Verify OpenClash branch ====="
+          git -C "$OC_DIR" branch --show-current
+          git -C "$OC_DIR" log -1 --oneline
+
+          test "$(git -C "$OC_DIR" branch --show-current)" = "dev"
+
+          echo "===== Verify OpenClash source version ====="
           grep -E '^(PKG_NAME|PKG_VERSION):=' "$OC_MAKEFILE"
 
-          # 清理旧的 OpenClash 编译结果，防止误用历史包。
-          find build_dir -type d -iname '*openclash*' \
-            -exec rm -rf {} + 2>/dev/null || true
+          echo "===== Check duplicate OpenClash packages ====="
+          find package feeds -path '*openclash*' -type f -o -type l 2>/dev/null || true
 
-          find bin -type f -iname '*openclash*.ipk' \
-            -delete 2>/dev/null || true
+          # Clean any stale target output to avoid accidental reuse.
+          rm -rf build_dir/target-*/luci-app-openclash*
+          rm -rf build_dir/target-*/root-*/etc/openclash
+          rm -rf bin/packages/*/*/luci-app-openclash*
+          rm -rf staging_dir/target-*/root-*/etc/openclash
 
       - name: Patch OpenClash upgrade handling
         working-directory: openwrt
@@ -247,7 +284,7 @@ jobs:
           i = indexes[0]
           indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
 
-          # 不恢复旧内核，避免升级后覆盖新内核。
+          # Avoid restoring old core during upgrade.
           lines[i] = indent + 'rm -rf "/tmp/etc/openclash/core"'
 
           p.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -285,23 +322,11 @@ jobs:
 
           echo "===== Verify OpenClash patches ====="
 
-          sed -n \
-            '/lib\/upgrade\/keep\.d\/luci-app-openclash/,/^EOF/p' \
-            "$UCI_DEFAULTS"
-
-          grep -n -A2 -B2 \
-            '/tmp/etc/openclash/core' \
-            "$INIT_SCRIPT"
-
-          grep -n -A2 -B2 \
-            '/tmp/openclash/core' \
-            "$MAKEFILE"
-
           if grep -A20 \
             'lib/upgrade/keep.d/luci-app-openclash' \
             "$UCI_DEFAULTS" | grep -qx '/etc/openclash/'
           then
-            echo "ERROR: whole /etc/openclash/ keep rule still exists"
+            echo "ERROR: whole /etc/openclash/ is still preserved"
             exit 1
           fi
 
@@ -315,36 +340,9 @@ jobs:
 
           echo "OpenClash patch verification: OK"
 
-      - name: Load custom feeds
-        run: |
-          [ -e "$FEEDS_CONF" ] && mv "$FEEDS_CONF" openwrt/feeds.conf.default
-          chmod +x "$DIY_P1_SH"
-          cd openwrt
-          "$GITHUB_WORKSPACE/$DIY_P1_SH"
-
-      - name: Install romupdate2
-        run: |
-          cd openwrt/package
-          rm -rf romupdate2
-          git clone --depth 1 https://github.com/VinsonYoung/romupdate2.git
-
-      - name: Run lenyu
-        run: |
-          cd openwrt
-          bash "$GITHUB_WORKSPACE/lenyu.sh"
-
-      - name: Update feeds
-        run: |
-          cd openwrt
-          ./scripts/feeds update -a
-
-      - name: Install feeds
-        run: |
-          cd openwrt
-          ./scripts/feeds install -a
-
       - name: Load custom configuration
         run: |
+          set -euo pipefail
           [ -e files ] && mv files openwrt/files
           [ -e "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
           chmod +x "$DIY_P2_SH"
@@ -410,12 +408,12 @@ jobs:
           gzip -dc "$CORE_GZ" > "$CORE_BIN"
           test -s "$CORE_BIN"
 
-          # 1. 放入固件 overlay。
+          # 1. Put into firmware overlay.
           cp -f "$CORE_BIN" "$CORE_DIR/clash_meta"
           chmod 4755 "$CORE_DIR/clash_meta"
 
-          # 2. 放入 OpenClash 安装包。
-          #    升级重新安装 luci-app-openclash 时会重新写入该文件。
+          # 2. Put into OpenClash package directory too.
+          #    This ensures upgrade/install writes a fresh core after package install.
           cp -f "$CORE_BIN" "$PKG_CORE_DIR/clash_meta"
           chmod 4755 "$PKG_CORE_DIR/clash_meta"
 
@@ -423,7 +421,6 @@ jobs:
           ls -lh "$CORE_DIR/clash_meta"
           sha256sum "$CORE_DIR/clash_meta"
           file "$CORE_DIR/clash_meta"
-          "$CORE_DIR/clash_meta" -v
 
           echo "===== Verify package core ====="
           ls -lh "$PKG_CORE_DIR/clash_meta"
@@ -455,7 +452,6 @@ jobs:
 
           unzip -tq "$ZIP"
           unzip -q -o "$ZIP" -d "$TMP"
-
           test -f "$TMP/dist/index.html"
 
           cp -a "$TMP/dist/." "$UI_DIR/"
@@ -481,7 +477,7 @@ jobs:
 
           test "$(git -C package/luci-app-openclash branch --show-current)" = "dev"
 
-          echo "===== Verify OpenClash version ====="
+          echo "===== Verify OpenClash source version ====="
           grep -E '^(PKG_NAME|PKG_VERSION):=' "$OC_MAKEFILE"
 
           echo "===== Verify firmware core ====="
@@ -490,7 +486,6 @@ jobs:
           ls -lh "$CORE"
           sha256sum "$CORE"
           file "$CORE"
-          "$CORE" -v
 
           echo "===== Verify package core ====="
           test -f "$PKG_CORE"
