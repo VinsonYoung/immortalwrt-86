@@ -33,34 +33,49 @@ import sys
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 
+# If this patch was already applied, skip.
 if "refresh-core.sh" not in text:
     lines = text.splitlines()
-    start = None
-    end = None
 
+    install_start = None
+    install_end = None
+
+    # Try the classic block name first.
     for i, line in enumerate(lines):
-        if line.strip() == "define Package/luci-app-openclash/install":
-            start = i
+        s = line.strip()
+        if s == "define Package/luci-app-openclash/install":
+            install_start = i
             break
 
-    if start is None:
-        raise SystemExit("OpenClash install definition not found")
+    # Some newer OpenClash dev Makefiles may use a more generic block layout.
+    if install_start is None:
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if s.startswith("define Package/") and "luci-app-openclash" in s and "install" in s:
+                install_start = i
+                break
 
-    for i in range(start + 1, len(lines)):
+    if install_start is None:
+        print("INFO: OpenClash install definition not found, skipping patch.")
+        raise SystemExit(0)
+
+    for i in range(install_start + 1, len(lines)):
         if lines[i].strip() == "endef":
-            end = i
+            install_end = i
             break
 
-    if end is None:
-        raise SystemExit("OpenClash install definition terminator not found")
+    if install_end is None:
+        print("INFO: OpenClash install terminator not found, skipping patch.")
+        raise SystemExit(0)
 
+    # Add package-private copy so the post-install hook can overwrite the runtime core.
     install_lines = [
         "",
         "\t# Keep a package-private copy for the post-install core refresh hook.",
         "\t$(INSTALL_DIR) $(1)/usr/share/openclash/core",
         "\t$(INSTALL_BIN) ./root/etc/openclash/core/clash_meta $(1)/usr/share/openclash/core/clash_meta",
     ]
-    lines[end:end] = install_lines
+    lines[install_end:install_end] = install_lines
     text = "\n".join(lines) + "\n"
 
     text += """
@@ -69,18 +84,18 @@ define Package/luci-app-openclash/postinst
 #!/bin/sh
 
 # Do not touch the build root while the image is being assembled.
-if [ -n \"$${IPKG_INSTROOT}\" ]; then
+if [ -n "$${IPKG_INSTROOT}" ]; then
     exit 0
 fi
 
-SRC=\"/usr/share/openclash/core/clash_meta\"
-DST=\"/etc/openclash/core/clash_meta\"
+SRC="/usr/share/openclash/core/clash_meta"
+DST="/etc/openclash/core/clash_meta"
 
-if [ -f \"$${SRC}\" ]; then
+if [ -f "$${SRC}" ]; then
     mkdir -p /etc/openclash/core
-    rm -f \"$${DST}\"
-    cp -f \"$${SRC}\" \"$${DST}\"
-    chmod 0755 \"$${DST}\"
+    rm -f "$${DST}"
+    cp -f "$${SRC}" "$${DST}"
+    chmod 0755 "$${DST}"
 fi
 
 exit 0
@@ -88,6 +103,9 @@ endef
 """
     path.write_text(text, encoding="utf-8")
 PY_PATCH
+else
+    echo "WARN: OpenClash Makefile not found at $OC_MAKEFILE"
+    find package -path '*openclash*' -maxdepth 6 -print 2>/dev/null || true
 fi
 
 # welcome test
