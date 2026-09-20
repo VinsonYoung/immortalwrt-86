@@ -38,6 +38,10 @@ touch files/usr/share/Lenyu-pw.sh
 
 # 修改为源码内部的相对路径
 cat > package/base-files/files/etc/sysupgrade.conf <<'EOF'
+# ===== 软件源配置保留 =====
+/etc/apk/repositories.d/customfeeds.list
+/etc/apk/repositories.d/distfeeds.list
+
 # ===== 网络与系统配置保留 =====
 /etc/config/dhcp
 /etc/config/sing-box
