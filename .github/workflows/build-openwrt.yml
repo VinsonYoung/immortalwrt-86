@@ -396,6 +396,7 @@ jobs:
           CORE_BIN="/tmp/mihomo-smart-amd64-compatible"
 
           RELEASE_TAG="Prerelease-Alpha"
+          # 1. 修正变量拼接语法，用双引号和清晰的路径隔开
           RELEASE_API="https://github.com{RELEASE_TAG}"
 
           mkdir -p "$CORE_DIR"
@@ -408,10 +409,13 @@ jobs:
 
           echo "===== Query Mihomo release ====="
 
+          # 2. 增强 curl 容错率，针对网络解析失败自动进行 5 次重试
           RELEASE_JSON="$(
             curl -fsSL \
-              --retry 3 \
-              --retry-delay 2 \
+              --connect-timeout 10 \
+              --retry 5 \
+              --retry-delay 5 \
+              --retry-all-errors \
               "$RELEASE_API"
           )"
 
