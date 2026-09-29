@@ -22,6 +22,7 @@ b. Local and cloud firmware version numbers can be viewed.
 
 ## Thanks
 
+- Lenyu2020
 - P3TERX
 - smallprogram
 - coolsnowwolf
