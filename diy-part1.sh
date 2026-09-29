@@ -1048,7 +1048,7 @@ for pkg in $TARGETS; do
 			show_log "$TMP/add.log"
 		elif [ -n "$installed_ver" ] && [ -n "$available_ver" ] && ver_gt "$available_ver" "$installed_ver"; then
 			echo "更新 $pkg：$installed_ver -> $available_ver"
-			mkdir -p "$TMP"  # 👈 在这里加入这一行，确保目录一定存在
+			mkdir -p "$TMP"
 			apk add --no-network -u "$pkg" >"$TMP/add.log" 2>&1 || fail=1
 			show_log "$TMP/add.log"
 		else
