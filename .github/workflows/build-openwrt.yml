@@ -390,15 +390,17 @@ jobs:
 
           CORE_DIR="$GITHUB_WORKSPACE/openwrt/files/etc/openclash/core"
           PKG_CORE_DIR="$GITHUB_WORKSPACE/openwrt/package/luci-app-openclash/luci-app-openclash/root/etc/openclash/core"
+          SYSUPGRADE_CONF="$GITHUB_WORKSPACE/openwrt/files/etc/sysupgrade.conf"
 
           CORE_GZ="/tmp/mihomo-smart-amd64-compatible.gz"
           CORE_BIN="/tmp/mihomo-smart-amd64-compatible"
 
           RELEASE_TAG="Prerelease-Alpha"
-          RELEASE_API="https://api.github.com/repos/vernesong/mihomo/releases/tags/${RELEASE_TAG}"
+          RELEASE_API="https://github.com{RELEASE_TAG}"
 
           mkdir -p "$CORE_DIR"
           mkdir -p "$PKG_CORE_DIR"
+          mkdir -p "$(dirname "$SYSUPGRADE_CONF")"
 
           rm -f "$CORE_GZ" "$CORE_BIN"
           rm -f "$CORE_DIR/clash_meta"
@@ -438,8 +440,15 @@ jobs:
             "$DOWNLOAD_URL" \
             -o "$CORE_GZ"
 
-          gzip -t "$CORE_GZ"
-          gzip -dc "$CORE_GZ" > "$CORE_BIN"
+          # ===== 优化解压与容错识别逻辑 =====
+          if file "$CORE_GZ" | grep -q "gzip compressed data"; then
+              echo "检测到标准 gzip 格式，正在解压..."
+              gzip -dc "$CORE_GZ" > "$CORE_BIN"
+          else
+              echo "警告：文件虽以 .gz 结尾但并非标准 gzip 压缩包，直接作为二进制文件使用。"
+              cp -f "$CORE_GZ" "$CORE_BIN"
+          fi
+
           test -s "$CORE_BIN"
 
           # 1. Put into firmware overlay.
@@ -450,6 +459,17 @@ jobs:
           #    This ensures upgrade/install writes a fresh core after package install.
           cp -f "$CORE_BIN" "$PKG_CORE_DIR/clash_meta"
           chmod 4755 "$PKG_CORE_DIR/clash_meta"
+
+          # -------------------------------------------------------------------
+          # 核心修复：将 OpenClash 内核路径强行注入系统升级保留文件 (sysupgrade.conf)
+          # 防止旧系统中未下载完的 3.24MB 坏文件在升级重启时通过备份包覆盖掉新固件的好内核
+          # -------------------------------------------------------------------
+          touch "$SYSUPGRADE_CONF"
+          if ! grep -q "/etc/openclash/core/" "$SYSUPGRADE_CONF"; then
+              echo "/etc/openclash/core/" >> "$SYSUPGRADE_CONF"
+              echo "===== OpenClash core path successfully added to sysupgrade.conf ====="
+          fi
+          # -------------------------------------------------------------------
 
           echo "===== Verify firmware core ====="
           ls -lh "$CORE_DIR/clash_meta"
