@@ -88,6 +88,34 @@ cat > package/base-files/files/etc/sysupgrade.conf <<'EOF'
 /etc/crontabs/root
 EOF
 
+# ===== 升级前 hook 脚本：删除旧 OpenClash 内核 =====
+mkdir -p files/lib/upgrade/pre-upgrade.d
+
+cat > files/lib/upgrade/pre-upgrade.d/99-openclash-core-cleanup <<'UPGRADE_EOF'
+#!/bin/sh
+echo "===== Preparing OpenClash core for upgrade ====="
+
+# Remove old clash cores
+rm -f /etc/openclash/core/clash_meta
+rm -f /etc/openclash/core/clash
+rm -f /etc/openclash/core/clash_tun
+
+# Remove backups
+rm -rf /etc/openclash/core/meta-backup
+rm -rf /etc/openclash/core/clash-backup
+rm -rf /etc/openclash/core/clash_tun-backup
+
+# Prevent upgrade scripts from restoring old cores
+rm -rf /tmp/openclash/core
+rm -rf /tmp/etc/openclash/core
+
+sync
+echo "OpenClash core cleanup done"
+exit 0
+UPGRADE_EOF
+
+chmod 0755 files/lib/upgrade/pre-upgrade.d/99-openclash-core-cleanup
+
 cat > rename.sh <<-'EOF'
 #!/bin/bash
 
