@@ -588,6 +588,8 @@ if [ ! -d /sys/firmware/efi ];then
         } > /etc/upgrade-debug/auth-before.log
 
         # 不使用 -n，保留配置升级
+        rm -f /etc/openclash/core/clash_meta
+        rm -rf /etc/openclash/core/meta-backup
         sysupgrade -v /tmp/immortalwrt_x86-64-${new_version}_sta_Lenyu.img.gz
     else
         echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
@@ -622,6 +624,8 @@ else
         } > /etc/upgrade-debug/auth-before.log
 
         # 不使用 -n，保留配置升级
+        rm -f /etc/openclash/core/clash_meta
+        rm -rf /etc/openclash/core/meta-backup
         sysupgrade -v /tmp/immortalwrt_x86-64-${new_version}_uefi-gpt_sta_Lenyu.img.gz
     else
         echo -e "\033[32m 本地已经是最新版本，还更个鸡巴毛啊… \033[0m"
