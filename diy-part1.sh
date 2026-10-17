@@ -53,10 +53,10 @@ cat > package/base-files/files/etc/sysupgrade.conf <<'EOF'
 /etc/config/passwall_server
 /etc/config/passwall
 
-# ===== OpenClash 配置与内核保留 =====
+# ===== OpenClash 配置保留 =====
 /etc/config/openclash
 /etc/openclash/
-/etc/openclash/core/
+# /etc/openclash/core/
 
 # ===== Passwall 规则保留 =====
 /usr/share/passwall/rules/
